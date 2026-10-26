@@ -246,153 +246,189 @@ def row_key(row):
 
 
 def compare_documents(doc_a, doc_b, name_a, name_b):
-    rows_a = doc_a.get("rows", [])
-    rows_b = doc_b.get("rows", [])
+    """Compare documents by a detected record key where possible, with exact-row fallback."""
     from collections import Counter, defaultdict
 
-    def clean_row(r):
-        return ["" if c is None else str(c).strip() for c in r]
+    rows_a = doc_a.get("rows", [])
+    rows_b = doc_b.get("rows", [])
 
-    def key_row(r):
-        return tuple(normalize_cell(c) for c in r)
+    def clean_row(row):
+        return ["" if cell is None else str(cell).strip() for cell in row]
 
-    # Use the first row as column headings when both documents appear to share a header.
+    def normalized_row(row):
+        return tuple(normalize_cell(cell) for cell in row)
+
     header_a = clean_row(rows_a[0]) if rows_a else []
     header_b = clean_row(rows_b[0]) if rows_b else []
-    same_header = bool(header_a and header_b and key_row(header_a) == key_row(header_b))
-    data_a = rows_a[1:] if same_header else rows_a[:]
-    data_b = rows_b[1:] if same_header else rows_b[:]
+    same_header = bool(header_a and header_b and normalized_row(header_a) == normalized_row(header_b))
     headers = header_a if same_header else []
+    data_a = [clean_row(r) for r in (rows_a[1:] if same_header else rows_a) if any(normalize_cell(c) for c in r)]
+    data_b = [clean_row(r) for r in (rows_b[1:] if same_header else rows_b) if any(normalize_cell(c) for c in r)]
 
-    data_a = [clean_row(r) for r in data_a if any(normalize_cell(c) for c in r)]
-    data_b = [clean_row(r) for r in data_b if any(normalize_cell(c) for c in r)]
+    # Prefer a business identifier such as Invoice No. rather than the first column.
+    key_candidates = ("invoice no", "invoice number", "inv no", "bill no", "bill number",
+                      "voucher no", "document no", "doc no", "reference no", "ref no", "gr no")
+    key_index = None
+    if headers:
+        normalized_headers = [re.sub(r"[^a-z0-9]+", " ", h.casefold()).strip() for h in headers]
+        for candidate in key_candidates:
+            for i, header in enumerate(normalized_headers):
+                if header == candidate or candidate in header:
+                    key_index = i
+                    break
+            if key_index is not None:
+                break
+    if key_index is None and headers:
+        # Use the first column only as a fallback, clearly identified in the report.
+        key_index = 0
+    key_label = headers[key_index] if key_index is not None and key_index < len(headers) else ("First column" if key_index == 0 else "Exact row")
 
-    # Pair records sharing the first non-empty field (often invoice/bill number).
-    # Full-row exact matches are counted separately; differing rows get human-readable remarks.
-    exact_a = Counter(key_row(r) for r in data_a)
-    exact_b = Counter(key_row(r) for r in data_b)
-    matched = sum((exact_a & exact_b).values())
+    def record_key(row):
+        if key_index is None or key_index >= len(row):
+            return ""
+        return normalize_cell(row[key_index])
 
-    def first_value(row):
-        for value in row:
-            if normalize_cell(value):
-                return normalize_cell(value)
-        return ""
+    def index_rows(rows):
+        index = defaultdict(list)
+        for position, row in enumerate(rows):
+            key = record_key(row)
+            if key:
+                index[key].append((position, row))
+        return index
 
-    grouped_a = defaultdict(list)
-    grouped_b = defaultdict(list)
-    for row in data_a:
-        grouped_a[first_value(row)].append(row)
-    for row in data_b:
-        grouped_b[first_value(row)].append(row)
-
+    index_a, index_b = index_rows(data_a), index_rows(data_b)
+    counts_a, counts_b = Counter(normalized_row(r) for r in data_a), Counter(normalized_row(r) for r in data_b)
+    exact_matched = sum((counts_a & counts_b).values())
     remarks = []
-    paired_a_indices = set()
-    paired_b_indices = set()
-    # Pair changed rows by first column/key, only where a key occurs on both sides.
-    for key in grouped_a.keys() & grouped_b.keys():
-        if not key:
+    paired_a, paired_b = set(), set()
+    duplicate_keys = []
+
+    def to_num(value):
+        try:
+            text = str(value).replace(",", "").replace("₹", "").replace("%", "").strip()
+            return float(text) if text else None
+        except (TypeError, ValueError):
+            return None
+
+    for key in sorted(index_a.keys() & index_b.keys()):
+        a_items, b_items = index_a[key], index_b[key]
+        if len(a_items) != 1 or len(b_items) != 1:
+            duplicate_keys.append({"key": key, "count_a": len(a_items), "count_b": len(b_items)})
             continue
-        a_rows = grouped_a[key]
-        b_rows = grouped_b[key]
-        if len(a_rows) != 1 or len(b_rows) != 1:
-            continue
-        a_row, b_row = a_rows[0], b_rows[0]
-        if key_row(a_row) == key_row(b_row):
+        pos_a, row_a = a_items[0]
+        pos_b, row_b = b_items[0]
+        paired_a.add(pos_a); paired_b.add(pos_b)
+        if normalized_row(row_a) == normalized_row(row_b):
             continue
         fields = []
-        max_cols = max(len(a_row), len(b_row))
-        for i in range(max_cols):
-            av = a_row[i] if i < len(a_row) else ""
-            bv = b_row[i] if i < len(b_row) else ""
+        for i in range(max(len(row_a), len(row_b))):
+            av = row_a[i] if i < len(row_a) else ""
+            bv = row_b[i] if i < len(row_b) else ""
             if normalize_cell(av) == normalize_cell(bv):
                 continue
             col_name = headers[i] if i < len(headers) and headers[i].strip() else f"Column {i + 1}"
-            # If a numeric-looking field changed, calculate an absolute numeric difference.
             remark = f"{col_name}: '{av or '(blank)'}' → '{bv or '(blank)'}'"
-            def to_num(v):
-                try:
-                    return float(str(v).replace(",", "").replace("₹", "").strip())
-                except (TypeError, ValueError):
-                    return None
             na, nb = to_num(av), to_num(bv)
             if na is not None and nb is not None:
                 delta = nb - na
-                remark += f" (difference: {delta:,.2f})"
+                remark += f" (B − A: {delta:+,.2f})"
             fields.append(remark)
-        remarks.append({
-            "key": a_row[0] if a_row else key,
-            "row_a": a_row,
-            "row_b": b_row,
-            "remark": "; ".join(fields) if fields else "Rows differ after normalization.",
-        })
+        remarks.append({"key": row_a[key_index] if key_index < len(row_a) else key,
+                        "row_a": row_a, "row_b": row_b, "remark": "; ".join(fields)})
 
-    # Multiset exact-row comparison keeps duplicates and identifies records unique to each side.
-    counter_a = Counter(key_row(r) for r in data_a)
-    counter_b = Counter(key_row(r) for r in data_b)
-    display_a, display_b = {}, {}
-    for r in data_a:
-        display_a.setdefault(key_row(r), r)
-    for r in data_b:
-        display_b.setdefault(key_row(r), r)
-    only_a = []
-    only_b = []
-    for key, count in (counter_a - counter_b).items():
-        only_a.extend([display_a[key]] * count)
-    for key, count in (counter_b - counter_a).items():
-        only_b.extend([display_b[key]] * count)
+    only_a, only_b = [], []
+    if key_index is not None:
+        for i, row in enumerate(data_a):
+            key = record_key(row)
+            if not key or key not in index_b or (key in index_b and (len(index_a[key]) != 1 or len(index_b[key]) != 1)):
+                only_a.append(row)
+        for i, row in enumerate(data_b):
+            key = record_key(row)
+            if not key or key not in index_a or (key in index_a and (len(index_a[key]) != 1 or len(index_b[key]) != 1)):
+                only_b.append(row)
+        # Rows with shared unique keys are paired records, even when some fields differ.
+    else:
+        counter_a, counter_b = Counter(normalized_row(r) for r in data_a), Counter(normalized_row(r) for r in data_b)
+        display_a, display_b = {}, {}
+        for row in data_a: display_a.setdefault(normalized_row(row), row)
+        for row in data_b: display_b.setdefault(normalized_row(row), row)
+        for key, count in (counter_a - counter_b).items(): only_a.extend([display_a[key]] * count)
+        for key, count in (counter_b - counter_a).items(): only_b.extend([display_b[key]] * count)
 
-    # Distinguish rows explained by a changed-record remark from truly unmatched rows.
-    changed_keys = {normalize_cell(item["key"]) for item in remarks}
-    unmatched_a = [r for r in only_a if first_value(r) not in changed_keys]
-    unmatched_b = [r for r in only_b if first_value(r) not in changed_keys]
+    # Simple arithmetic validation is separate from comparison and never changes match status.
+    validation_issues = []
+    if headers:
+        norm_headers = [re.sub(r"[^a-z0-9]+", " ", h.casefold()).strip() for h in headers]
+        def col_index(*names):
+            for i, h in enumerate(norm_headers):
+                if any(name in h for name in names): return i
+            return None
+        qty_i = col_index("quantity", "qty")
+        rate_i = col_index("rate", "unit price", "unit rate")
+        taxable_i = col_index("taxable amount", "taxable value", "taxable")
+        gst_rate_i = col_index("gst rate", "tax rate")
+        gst_amount_i = col_index("gst amount", "tax amount")
+        invoice_i = col_index("invoice amount", "total amount", "gross amount", "inv value")
+        def add_issue(source, row, row_num, message):
+            validation_issues.append({"source": source, "key": row[key_index] if key_index is not None and key_index < len(row) else (row[0] if row else f"Row {row_num}"), "row_number": row_num, "message": message})
+        for source, rows in ((name_a, data_a), (name_b, data_b)):
+            for row_num, row in enumerate(rows, start=2 if same_header else 1):
+                def val(idx): return to_num(row[idx]) if idx is not None and idx < len(row) else None
+                qty, rate, taxable = val(qty_i), val(rate_i), val(taxable_i)
+                gst_rate, gst_amount, invoice_amount = val(gst_rate_i), val(gst_amount_i), val(invoice_i)
+                if qty is not None and rate is not None and taxable is not None and abs(qty * rate - taxable) > 0.02:
+                    add_issue(source, row, row_num, f"Quantity × Rate = {qty * rate:,.2f}, but Taxable Amount = {taxable:,.2f}.")
+                if taxable is not None and gst_rate is not None and gst_amount is not None and abs(taxable * gst_rate / 100 - gst_amount) > 0.02:
+                    add_issue(source, row, row_num, f"Expected GST = {taxable * gst_rate / 100:,.2f}, but GST Amount = {gst_amount:,.2f}.")
+                if taxable is not None and gst_amount is not None and invoice_amount is not None and abs(taxable + gst_amount - invoice_amount) > 0.02:
+                    add_issue(source, row, row_num, f"Taxable Amount + GST Amount = {taxable + gst_amount:,.2f}, but Invoice Amount = {invoice_amount:,.2f}.")
 
     return {
-        "name_a": name_a,
-        "name_b": name_b,
-        "type_a": doc_a.get("kind", "Document"),
-        "type_b": doc_b.get("kind", "Document"),
-        "rows_a": len(data_a),
-        "rows_b": len(data_b),
-        "matched": matched,
-        "only_a": only_a[:500],
-        "only_b": only_b[:500],
-        "unmatched_a": unmatched_a[:500],
-        "unmatched_b": unmatched_b[:500],
+        "name_a": name_a, "name_b": name_b,
+        "type_a": doc_a.get("kind", "Document"), "type_b": doc_b.get("kind", "Document"),
+        "rows_a": len(data_a), "rows_b": len(data_b),
+        "matched": exact_matched,
+        "matched_records": sum(1 for key in index_a.keys() & index_b.keys() if len(index_a[key]) == 1 and len(index_b[key]) == 1),
+        "key_column": key_label,
         "remarks": remarks[:500],
-        "truncated": len(only_a) > 500 or len(only_b) > 500,
+        "only_a": only_a[:500], "only_b": only_b[:500],
+        "unmatched_a": only_a[:500], "unmatched_b": only_b[:500],
+        "duplicate_keys": duplicate_keys[:500], "validation_issues": validation_issues[:500],
+        "validation_truncated": len(validation_issues) > 500,
+        "truncated": len(only_a) > 500 or len(only_b) > 500 or len(remarks) > 500,
         "notes": doc_a.get("notes", []) + doc_b.get("notes", []),
     }
-
 @app.route("/export.csv", methods=["POST"])
 @login_required
 def export_csv():
-    # The report is posted back from the browser. No report is stored server-side.
-    # CSRF is enabled; exports should only be requested from the current authenticated session.
+    # Export only the report submitted from the authenticated results page; no report is stored.
     import json
     raw = request.form.get("report_json", "")
     if len(raw) > 2_000_000:
         abort(413)
     try:
-        import json
         result = json.loads(raw)
     except Exception:
         abort(400)
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(["Status", "Document A", "Document B", "Row"])
+    writer.writerow(["Section", "Record Key", "File A", "File B", "Details"])
+    for item in result.get("remarks", []):
+        writer.writerow(["Changed record", item.get("key", ""), " | ".join(map(str, item.get("row_a", []))),
+                         " | ".join(map(str, item.get("row_b", []))), item.get("remark", "")])
     for row in result.get("only_a", []):
-        writer.writerow(["Only in Document A", result.get("name_a", ""), result.get("name_b", ""), " | ".join(map(str, row))])
+        writer.writerow(["Only in A", "", " | ".join(map(str, row)), "", ""])
     for row in result.get("only_b", []):
-        writer.writerow(["Only in Document B", result.get("name_a", ""), result.get("name_b", ""), " | ".join(map(str, row))])
-    response = send_file(
-        io.BytesIO(output.getvalue().encode("utf-8-sig")),
-        mimetype="text/csv",
-        as_attachment=True,
-        download_name="comparison_report.csv",
-    )
+        writer.writerow(["Only in B", "", "", " | ".join(map(str, row)), ""])
+    for issue in result.get("validation_issues", []):
+        writer.writerow(["Calculation warning", issue.get("key", ""), issue.get("source", ""),
+                         f"Row {issue.get('row_number', '')}", issue.get("message", "")])
+    for item in result.get("duplicate_keys", []):
+        writer.writerow(["Ambiguous duplicate key", item.get("key", ""), f"Count: {item.get('count_a', 0)}",
+                         f"Count: {item.get('count_b', 0)}", "Manual review required"])
+    response = send_file(io.BytesIO(output.getvalue().encode("utf-8-sig")), mimetype="text/csv",
+                         as_attachment=True, download_name="reconciliation_report.csv")
     return response
-
 
 @app.errorhandler(RequestEntityTooLarge)
 def too_large(_error):
