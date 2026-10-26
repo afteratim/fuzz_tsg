@@ -248,37 +248,121 @@ def row_key(row):
 def compare_documents(doc_a, doc_b, name_a, name_b):
     rows_a = doc_a.get("rows", [])
     rows_b = doc_b.get("rows", [])
-    # Multiset comparison preserves duplicate counts.
-    from collections import Counter
-    counter_a = Counter(row_key(r) for r in rows_a if any(normalize_cell(c) for c in r))
-    counter_b = Counter(row_key(r) for r in rows_b if any(normalize_cell(c) for c in r))
-    missing_b = []
-    missing_a = []
-    row_display_a = {}
-    row_display_b = {}
-    for r in rows_a:
-        row_display_a.setdefault(row_key(r), r)
-    for r in rows_b:
-        row_display_b.setdefault(row_key(r), r)
+    from collections import Counter, defaultdict
+
+    def clean_row(r):
+        return ["" if c is None else str(c).strip() for c in r]
+
+    def key_row(r):
+        return tuple(normalize_cell(c) for c in r)
+
+    # Use the first row as column headings when both documents appear to share a header.
+    header_a = clean_row(rows_a[0]) if rows_a else []
+    header_b = clean_row(rows_b[0]) if rows_b else []
+    same_header = bool(header_a and header_b and key_row(header_a) == key_row(header_b))
+    data_a = rows_a[1:] if same_header else rows_a[:]
+    data_b = rows_b[1:] if same_header else rows_b[:]
+    headers = header_a if same_header else []
+
+    data_a = [clean_row(r) for r in data_a if any(normalize_cell(c) for c in r)]
+    data_b = [clean_row(r) for r in data_b if any(normalize_cell(c) for c in r)]
+
+    # Pair records sharing the first non-empty field (often invoice/bill number).
+    # Full-row exact matches are counted separately; differing rows get human-readable remarks.
+    exact_a = Counter(key_row(r) for r in data_a)
+    exact_b = Counter(key_row(r) for r in data_b)
+    matched = sum((exact_a & exact_b).values())
+
+    def first_value(row):
+        for value in row:
+            if normalize_cell(value):
+                return normalize_cell(value)
+        return ""
+
+    grouped_a = defaultdict(list)
+    grouped_b = defaultdict(list)
+    for row in data_a:
+        grouped_a[first_value(row)].append(row)
+    for row in data_b:
+        grouped_b[first_value(row)].append(row)
+
+    remarks = []
+    paired_a_indices = set()
+    paired_b_indices = set()
+    # Pair changed rows by first column/key, only where a key occurs on both sides.
+    for key in grouped_a.keys() & grouped_b.keys():
+        if not key:
+            continue
+        a_rows = grouped_a[key]
+        b_rows = grouped_b[key]
+        if len(a_rows) != 1 or len(b_rows) != 1:
+            continue
+        a_row, b_row = a_rows[0], b_rows[0]
+        if key_row(a_row) == key_row(b_row):
+            continue
+        fields = []
+        max_cols = max(len(a_row), len(b_row))
+        for i in range(max_cols):
+            av = a_row[i] if i < len(a_row) else ""
+            bv = b_row[i] if i < len(b_row) else ""
+            if normalize_cell(av) == normalize_cell(bv):
+                continue
+            col_name = headers[i] if i < len(headers) and headers[i].strip() else f"Column {i + 1}"
+            # If a numeric-looking field changed, calculate an absolute numeric difference.
+            remark = f"{col_name}: '{av or '(blank)'}' → '{bv or '(blank)'}'"
+            def to_num(v):
+                try:
+                    return float(str(v).replace(",", "").replace("₹", "").strip())
+                except (TypeError, ValueError):
+                    return None
+            na, nb = to_num(av), to_num(bv)
+            if na is not None and nb is not None:
+                delta = nb - na
+                remark += f" (difference: {delta:,.2f})"
+            fields.append(remark)
+        remarks.append({
+            "key": a_row[0] if a_row else key,
+            "row_a": a_row,
+            "row_b": b_row,
+            "remark": "; ".join(fields) if fields else "Rows differ after normalization.",
+        })
+
+    # Multiset exact-row comparison keeps duplicates and identifies records unique to each side.
+    counter_a = Counter(key_row(r) for r in data_a)
+    counter_b = Counter(key_row(r) for r in data_b)
+    display_a, display_b = {}, {}
+    for r in data_a:
+        display_a.setdefault(key_row(r), r)
+    for r in data_b:
+        display_b.setdefault(key_row(r), r)
+    only_a = []
+    only_b = []
     for key, count in (counter_a - counter_b).items():
-        missing_b.extend([row_display_a.get(key, list(key))] * count)
+        only_a.extend([display_a[key]] * count)
     for key, count in (counter_b - counter_a).items():
-        missing_a.extend([row_display_b.get(key, list(key))] * count)
+        only_b.extend([display_b[key]] * count)
+
+    # Distinguish rows explained by a changed-record remark from truly unmatched rows.
+    changed_keys = {normalize_cell(item["key"]) for item in remarks}
+    unmatched_a = [r for r in only_a if first_value(r) not in changed_keys]
+    unmatched_b = [r for r in only_b if first_value(r) not in changed_keys]
 
     return {
         "name_a": name_a,
         "name_b": name_b,
         "type_a": doc_a.get("kind", "Document"),
         "type_b": doc_b.get("kind", "Document"),
-        "rows_a": len(rows_a),
-        "rows_b": len(rows_b),
-        "matched": sum((counter_a & counter_b).values()),
-        "only_a": missing_b[:500],
-        "only_b": missing_a[:500],
-        "truncated": len(missing_b) > 500 or len(missing_a) > 500,
+        "rows_a": len(data_a),
+        "rows_b": len(data_b),
+        "matched": matched,
+        "only_a": only_a[:500],
+        "only_b": only_b[:500],
+        "unmatched_a": unmatched_a[:500],
+        "unmatched_b": unmatched_b[:500],
+        "remarks": remarks[:500],
+        "truncated": len(only_a) > 500 or len(only_b) > 500,
         "notes": doc_a.get("notes", []) + doc_b.get("notes", []),
     }
-
 
 @app.route("/export.csv", methods=["POST"])
 @login_required
