@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}Comparison results · Private Document Analyzer{% endblock %}
+{% block content %}
+<div class="results-heading">
+  <a class="back-link" href="{{ url_for('index') }}">← New comparison</a>
+  <div class="pill"><span class="dot"></span> Comparison complete</div>
+  <h1>Here's what I found</h1>
+  <p class="muted">Exact row comparison · No AI API used</p>
+</div>
+<section class="summary-grid">
+  <article class="metric"><span>Rows in A</span><strong>{{ result.rows_a }}</strong></article>
+  <article class="metric"><span>Rows in B</span><strong>{{ result.rows_b }}</strong></article>
+  <article class="metric"><span>Matched rows</span><strong>{{ result.matched }}</strong></article>
+  <article class="metric warn"><span>Differences</span><strong>{{ result.only_a|length + result.only_b|length }}{% if result.truncated %}+{% endif %}</strong></article>
+</section>
+<section class="chat-card">
+  <div class="assistant-row">
+    <div class="avatar">◈</div>
+    <div class="bubble">
+      <strong>Document Assistant</strong>
+      <p><b>{{ result.only_a|length }}</b> row(s) appear only in <b>{{ result.name_a }}</b>, and <b>{{ result.only_b|length }}</b> row(s) appear only in <b>{{ result.name_b }}</b>{% if result.truncated %}. The display is limited to 500 rows per side.{% endif %} Matching is based on complete normalized rows, not semantic invoice matching.</p>
+    </div>
+  </div>
+  {% if result.notes %}
+  <div class="notice"><strong>Extraction notes</strong><ul>{% for note in result.notes %}<li>{{ note }}</li>{% endfor %}</ul></div>
+  {% endif %}
+  <h2>Only in {{ result.name_a }}</h2>
+  {% if result.only_a %}
+  <div class="table-wrap"><table><thead><tr><th>#</th><th>Extracted row</th></tr></thead><tbody>
+  {% for row in result.only_a %}<tr><td>{{ loop.index }}</td><td>{{ row|join(" | ") }}</td></tr>{% endfor %}
+  </tbody></table></div>
+  {% else %}<p class="empty">No unique rows found in this direction.</p>{% endif %}
+  <h2>Only in {{ result.name_b }}</h2>
+  {% if result.only_b %}
+  <div class="table-wrap"><table><thead><tr><th>#</th><th>Extracted row</th></tr></thead><tbody>
+  {% for row in result.only_b %}<tr><td>{{ loop.index }}</td><td>{{ row|join(" | ") }}</td></tr>{% endfor %}
+  </tbody></table></div>
+  {% else %}<p class="empty">No unique rows found in this direction.</p>{% endif %}
+  <form method="post" action="{{ url_for('export_csv') }}" class="export-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="report_json" value="{{ result|tojson|forceescape }}">
+    <button class="primary" type="submit">Export differences as CSV ↓</button>
+  </form>
+</section>
+<p class="notice">Results are rendered in this response and are not saved in an application database. Close the page when finished. Verify OCR output and important financial figures manually.</p>
+{% endblock %}

@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Sign in · Private Document Analyzer{% endblock %}
+{% block content %}
+<section class="login-card">
+  <div class="hero-symbol">◈</div>
+  <h1>Welcome back</h1>
+  <p class="muted">Sign in to compare documents in your private workspace.</p>
+  <form method="post" action="{{ url_for('login') }}" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label>Username<input name="username" autocomplete="username" required maxlength="120"></label>
+    <label>Password<input type="password" name="password" autocomplete="current-password" required maxlength="256"></label>
+    <button class="primary" type="submit">Sign in securely</button>
+  </form>
+  <p class="tiny">Use the credentials configured in your hosting environment.</p>
+</section>
+{% endblock %}

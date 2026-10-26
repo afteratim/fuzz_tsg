@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Workspace · Private Document Analyzer{% endblock %}
+{% block content %}
+<div class="welcome">
+  <div class="pill"><span class="dot"></span> Protected workspace</div>
+  <h1>What would you like to compare?</h1>
+  <p class="muted">Upload two documents. The app extracts rows locally on the server and reports exact row differences. No external AI API is used.</p>
+</div>
+<section class="chat-card">
+  <div class="assistant-row">
+    <div class="avatar">◈</div>
+    <div class="bubble"><strong>Document Assistant</strong><p>Choose two documents below. I'll show records found only in one file and preserve duplicate counts.</p></div>
+  </div>
+  <form method="post" action="{{ url_for('analyze') }}" enctype="multipart/form-data" class="upload-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label class="file-drop" for="documents">
+      <span class="upload-icon">↑</span>
+      <strong>Select two documents</strong>
+      <span class="muted">PDF, Excel, CSV, DOCX, TXT, RTF or image OCR</span>
+      <span class="tiny">Maximum 25 MB per file · exactly two files</span>
+    </label>
+    <input id="documents" name="documents" type="file" multiple required accept=".pdf,.xlsx,.xlsm,.xltx,.xltm,.xls,.csv,.tsv,.txt,.docx,.rtf,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.webp">
+    <div id="selected-files" class="selected-files">No files selected</div>
+    <button class="primary" type="submit">Compare documents <span>→</span></button>
+  </form>
+</section>
+<section class="info-grid">
+  <article class="info-card"><span class="card-icon">⇄</span><h3>Compare rows</h3><p>Case-insensitive, whitespace-normalized exact row comparison.</p></article>
+  <article class="info-card"><span class="card-icon">▤</span><h3>Multiple formats</h3><p>PDF, Office spreadsheets, CSV, DOCX, text, RTF and common images.</p></article>
+  <article class="info-card"><span class="card-icon">⌁</span><h3>Temporary handling</h3><p>Uploaded files are held in a temporary request folder and cleaned up after processing.</p></article>
+</section>
+<p class="notice"><strong>Privacy note:</strong> This version processes uploads on Render. Do not upload documents unless cloud processing is permitted. OCR may misread digits; verify important values against the originals.</p>
+<script src="{{ url_for('static', filename='app.js') }}" defer></script>
+{% endblock %}
