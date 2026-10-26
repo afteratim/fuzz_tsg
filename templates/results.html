@@ -4,49 +4,63 @@
 <div class="results-heading">
   <a class="back-link" href="{{ url_for('index') }}">← New comparison</a>
   <div class="pill"><span class="dot"></span> Comparison complete</div>
-  <h1>Here's what I found</h1>
-  <p class="muted">Exact row comparison · No AI API used</p>
+  <h1>Reconciliation report</h1>
+  <p class="muted">Matched by <strong>{{ result.key_column }}</strong> where available · Arithmetic checks are separate from file differences</p>
 </div>
 <section class="summary-grid">
-  <article class="metric"><span>Rows in A</span><strong>{{ result.rows_a }}</strong></article>
-  <article class="metric"><span>Rows in B</span><strong>{{ result.rows_b }}</strong></article>
-  <article class="metric"><span>Matched rows</span><strong>{{ result.matched }}</strong></article>
-  <article class="metric warn"><span>Differences</span><strong>{{ result.only_a|length + result.only_b|length }}{% if result.truncated %}+{% endif %}</strong></article>
+  <article class="metric"><span>Records in A</span><strong>{{ result.rows_a }}</strong></article>
+  <article class="metric"><span>Records in B</span><strong>{{ result.rows_b }}</strong></article>
+  <article class="metric"><span>Matched records</span><strong>{{ result.matched_records }}</strong></article>
+  <article class="metric warn"><span>Changed records</span><strong>{{ result.remarks|length }}{% if result.truncated %}+{% endif %}</strong></article>
+  <article class="metric"><span>Only in A</span><strong>{{ result.only_a|length }}{% if result.truncated %}+{% endif %}</strong></article>
+  <article class="metric"><span>Only in B</span><strong>{{ result.only_b|length }}{% if result.truncated %}+{% endif %}</strong></article>
+  <article class="metric {% if result.validation_issues %}warn{% endif %}"><span>Calculation warnings</span><strong>{{ result.validation_issues|length }}{% if result.validation_truncated %}+{% endif %}</strong></article>
+  <article class="metric {% if result.duplicate_keys %}warn{% endif %}"><span>Ambiguous duplicate keys</span><strong>{{ result.duplicate_keys|length }}</strong></article>
 </section>
 <section class="chat-card">
   <div class="assistant-row">
     <div class="avatar">◈</div>
     <div class="bubble">
       <strong>Document Assistant</strong>
-      <p><b>{{ result.remarks|length }}</b> changed record(s) have a generated remark. There are <b>{{ result.unmatched_a|length }}</b> unmatched row(s) only in <b>{{ result.name_a }}</b> and <b>{{ result.unmatched_b|length }}</b> unmatched row(s) only in <b>{{ result.name_b }}</b>{% if result.truncated %}. The display is limited to 500 rows per side.{% endif %}</p>
+      <p>Compared <b>{{ result.rows_a }}</b> records in <b>{{ result.name_a }}</b> with <b>{{ result.rows_b }}</b> records in <b>{{ result.name_b }}</b>. A record with the same unique key on both sides is treated as matched, even when its fields changed. Missing records, changed fields, and calculation warnings are shown separately.</p>
     </div>
   </div>
-  {% if result.notes %}
-  <div class="notice"><strong>Extraction notes</strong><ul>{% for note in result.notes %}<li>{{ note }}</li>{% endfor %}</ul></div>
-  {% endif %}
-  <h2>Difference remarks</h2>
+  {% if result.notes %}<div class="notice"><strong>Extraction notes</strong><ul>{% for note in result.notes %}<li>{{ note }}</li>{% endfor %}</ul></div>{% endif %}
+
+  <h2>Changed records</h2>
   {% if result.remarks %}
-  <div class="table-wrap"><table><thead><tr><th>Record / key</th><th>{{ result.name_a }}</th><th>{{ result.name_b }}</th><th>Remark</th></tr></thead><tbody>
+  <div class="table-wrap"><table><thead><tr><th>{{ result.key_column }}</th><th>{{ result.name_a }}</th><th>{{ result.name_b }}</th><th>Field-level differences</th></tr></thead><tbody>
   {% for item in result.remarks %}<tr><td>{{ item.key }}</td><td>{{ item.row_a|join(" | ") }}</td><td>{{ item.row_b|join(" | ") }}</td><td><strong>{{ item.remark }}</strong></td></tr>{% endfor %}
   </tbody></table></div>
-  {% else %}<p class="empty">No changed records with a matching first-column key were found.</p>{% endif %}
+  {% else %}<p class="empty">No changed fields were found among uniquely matched records.</p>{% endif %}
+
   <h2>Only in {{ result.name_a }}</h2>
-  {% if result.unmatched_a %}
-  <div class="table-wrap"><table><thead><tr><th>#</th><th>Extracted row</th></tr></thead><tbody>
-  {% for row in result.unmatched_a %}<tr><td>{{ loop.index }}</td><td>{{ row|join(" | ") }}</td></tr>{% endfor %}
-  </tbody></table></div>
-  {% else %}<p class="empty">No unique rows found in this direction.</p>{% endif %}
+  {% if result.only_a %}<div class="table-wrap"><table><thead><tr><th>#</th><th>Extracted row</th></tr></thead><tbody>
+  {% for row in result.only_a %}<tr><td>{{ loop.index }}</td><td>{{ row|join(" | ") }}</td></tr>{% endfor %}
+  </tbody></table></div>{% else %}<p class="empty">No records were found only in this file.</p>{% endif %}
+
   <h2>Only in {{ result.name_b }}</h2>
-  {% if result.unmatched_b %}
-  <div class="table-wrap"><table><thead><tr><th>#</th><th>Extracted row</th></tr></thead><tbody>
-  {% for row in result.unmatched_b %}<tr><td>{{ loop.index }}</td><td>{{ row|join(" | ") }}</td></tr>{% endfor %}
-  </tbody></table></div>
-  {% else %}<p class="empty">No unique rows found in this direction.</p>{% endif %}
+  {% if result.only_b %}<div class="table-wrap"><table><thead><tr><th>#</th><th>Extracted row</th></tr></thead><tbody>
+  {% for row in result.only_b %}<tr><td>{{ loop.index }}</td><td>{{ row|join(" | ") }}</td></tr>{% endfor %}
+  </tbody></table></div>{% else %}<p class="empty">No records were found only in this file.</p>{% endif %}
+
+  <h2>Calculation validation</h2>
+  <p class="muted">These are arithmetic checks, not proof that the source document or tax treatment is legally correct.</p>
+  {% if result.validation_issues %}<div class="table-wrap"><table><thead><tr><th>File</th><th>Record</th><th>Row</th><th>Validation warning</th></tr></thead><tbody>
+  {% for issue in result.validation_issues %}<tr><td>{{ issue.source }}</td><td>{{ issue.key }}</td><td>{{ issue.row_number }}</td><td>{{ issue.message }}</td></tr>{% endfor %}
+  </tbody></table></div>{% if result.validation_truncated %}<p class="tiny">Only the first 500 validation warnings are shown.</p>{% endif %}
+  {% else %}<p class="empty">No arithmetic inconsistencies were detected in the supported amount columns.</p>{% endif %}
+
+  <h2>Ambiguous duplicate keys</h2>
+  {% if result.duplicate_keys %}<p class="muted">These keys occur more than once on at least one side. The app avoids guessing which duplicate row should match.</p><div class="table-wrap"><table><thead><tr><th>Key</th><th>Count in A</th><th>Count in B</th></tr></thead><tbody>
+  {% for item in result.duplicate_keys %}<tr><td>{{ item.key }}</td><td>{{ item.count_a }}</td><td>{{ item.count_b }}</td></tr>{% endfor %}
+  </tbody></table></div>{% else %}<p class="empty">No ambiguous duplicate keys were detected.</p>{% endif %}
+
   <form method="post" action="{{ url_for('export_csv') }}" class="export-form">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="report_json" value="{{ result|tojson|forceescape }}">
-    <button class="primary" type="submit">Export differences as CSV ↓</button>
+    <button class="primary" type="submit">Export full report as CSV ↓</button>
   </form>
 </section>
-<p class="notice">Results are rendered in this response and are not saved in an application database. Close the page when finished. Verify OCR output and important financial figures manually.</p>
+<p class="notice">Uploaded files are processed on Render and held in temporary request storage. Verify OCR output and important financial figures manually. Calculation warnings do not replace accounting or GST review.</p>
 {% endblock %}
