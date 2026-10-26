@@ -24,6 +24,13 @@
     <button class="primary" type="submit">Compare documents <span>→</span></button>
   </form>
 </section>
+<section class="chat-card">
+  <div class="assistant-row">
+    <div class="avatar">₹</div>
+    <div class="bubble"><strong>GST 2B & Purchase Reconciliation</strong><p>Upload one Excel workbook containing the Pur purchase table and the 2B portal table. Generate an Excel reconciliation report with amount differences, missing invoices, duplicate review, validation, and a summary.</p></div>
+  </div>
+  <a class="primary" href="{{ url_for('gst_reconcile') }}" style="display:inline-block;text-decoration:none;margin-top:12px">Open GST Reconciliation →</a>
+</section>
 <section class="info-grid">
   <article class="info-card"><span class="card-icon">⇄</span><h3>Compare rows</h3><p>Case-insensitive, whitespace-normalized exact row comparison.</p></article>
   <article class="info-card"><span class="card-icon">▤</span><h3>Multiple formats</h3><p>PDF, Office spreadsheets, CSV, DOCX, text, RTF and common images.</p></article>
