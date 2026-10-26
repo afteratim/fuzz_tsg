@@ -58,6 +58,18 @@ logging.getLogger("werkzeug").setLevel(logging.ERROR)
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "WARNING"))
 logger = logging.getLogger("private_analyzer")
 
+# Short-lived in-process cache for interactive GST report and workbook download.
+# Reports are not written to disk or a database; they disappear on restart/expiry.
+_GST_REPORT_CACHE = {}
+_GST_REPORT_TTL_SECONDS = 30 * 60
+
+def _purge_gst_report_cache():
+    now = time.time()
+    for token, entry in list(_GST_REPORT_CACHE.items()):
+        if now - entry["created"] > _GST_REPORT_TTL_SECONDS:
+            _GST_REPORT_CACHE.pop(token, None)
+
+
 # Basic in-memory login throttling. With the configured single Gunicorn worker,
 # attempts are tracked for this process only; this is not a replacement for MFA/WAF.
 _LOGIN_ATTEMPTS = defaultdict(deque)
@@ -260,8 +272,14 @@ def run_gst_reconciliation():
                 output = build_gst_workbook(report)
             finally:
                 workbook.close()
-        return send_file(io.BytesIO(output), mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                         as_attachment=True, download_name="GST_2B_Purchase_Reconciliation.xlsx")
+        _purge_gst_report_cache()
+        report_token = secrets.token_urlsafe(24)
+        _GST_REPORT_CACHE[report_token] = {
+            "created": time.time(),
+            "report": report,
+            "workbook": output,
+        }
+        return redirect(url_for("gst_reconciliation_report", token=report_token))
     except ValueError as exc:
         flash(str(exc), "error")
         return redirect(url_for("gst_reconcile"))
@@ -273,6 +291,87 @@ def run_gst_reconciliation():
         logger.error("GST reconciliation failed (type=%s).", type(exc).__name__)
         flash("GST reconciliation failed. Check table names and required columns, then try again.", "error")
         return redirect(url_for("gst_reconcile"))
+
+
+def gst_explanation(line):
+    """Create plain-language explanation and suggested action for a reconciliation line."""
+    remark = line.get("remark", "")
+    details = []
+    actions = []
+    if remark == "Matched":
+        return ("The invoice is present in both records and the compared amounts are within the configured tolerance.",
+                "No action normally required; retain supporting records.")
+    if remark == "Old Bill Filed":
+        return (line.get("detail") or "The 2B invoice date is earlier than the earliest valid Purchase date.",
+                "Check the invoice date, accounting period, and whether the bill was recorded in a later period.")
+    if remark == "Not in Tally":
+        return ("The invoice appears in 2B, but no corresponding invoice was found in the Purchase table.",
+                "Search the Purchase register by supplier GSTIN and invoice number; if genuinely absent, review the purchase entry.")
+    if remark == "Not on Portal":
+        return ("The invoice appears in Purchase, but no corresponding invoice was found in 2B.",
+                "Verify the supplier's reporting, invoice number, GSTIN, and relevant return period.")
+    if "GSTIN Mismatch" in remark:
+        return ("The invoice number appears on both sides, but the GSTIN differs. It has not been automatically matched.",
+                "Compare the GSTIN on the original supplier invoice and verify the correct supplier identity.")
+    if "Duplicate" in remark or "Review" in remark:
+        return (line.get("detail") or "Multiple or ambiguous records prevent a reliable automatic match.",
+                "Review each source row and confirm whether the records are duplicates or legitimate separate entries.")
+    if remark == "Date Difference":
+        return ("The invoice was matched, but the dates differ between Purchase and 2B.",
+                "Check the original invoice date and confirm whether the date difference is expected.")
+    if remark == "Not Matched":
+        fields = []
+        for label, key in [("Taxable value", "taxable_diff"), ("Invoice value", "invoice_value_diff"),
+                           ("IGST", "igst_diff"), ("CGST", "cgst_diff"), ("SGST", "sgst_diff")]:
+            value = line.get(key)
+            if value is not None and abs(value) > line.get("tolerance", 2.0):
+                fields.append(f"{label} differs by ₹{value:,.2f} (2B minus Pur)")
+        if fields:
+            details.append("; ".join(fields))
+        return (("Matched invoice, but " + "; ".join(details) + ".") if details else "One or more compared fields differ.",
+                "Compare the supplier invoice with both records and correct the source that is inaccurate.")
+    return (line.get("detail") or f"Review required: {remark}.",
+            "Inspect the source documents and resolve the discrepancy before relying on the reconciliation.")
+
+
+@app.route("/gst-reconcile/report/<token>", methods=["GET"])
+@login_required
+def gst_reconciliation_report(token):
+    _purge_gst_report_cache()
+    entry = _GST_REPORT_CACHE.get(token)
+    if not entry:
+        flash("This report has expired or the service restarted. Please upload the workbook again.", "error")
+        return redirect(url_for("gst_reconcile"))
+    report = entry["report"]
+    lines = []
+    for item in report["reconciliation"]:
+        row = dict(item)
+        row["explanation"], row["action"] = gst_explanation(row)
+        lines.append(row)
+    categories = sorted({x.get("remark", "") for x in lines})
+    summary_counts = dict(report.get("counts", {}))
+    summary_counts["Old Bill Filed"] = sum(1 for x in lines if x.get("remark") == "Old Bill Filed")
+    summary_counts["All Discrepancies"] = sum(1 for x in lines if x.get("remark") != "Matched")
+    summary_counts["Validation warnings"] = len(report.get("validation", []))
+    summary_counts["Duplicate / mismatch review entries"] = len(report.get("duplicates", []))
+    return render_template(
+        "gst_results.html",
+        report=report, lines=lines, categories=categories,
+        summary_counts=summary_counts, token=token
+    )
+
+
+@app.route("/gst-reconcile/download/<token>", methods=["GET"])
+@login_required
+def download_gst_reconciliation(token):
+    _purge_gst_report_cache()
+    entry = _GST_REPORT_CACHE.get(token)
+    if not entry:
+        flash("This report has expired or the service restarted. Please upload the workbook again.", "error")
+        return redirect(url_for("gst_reconcile"))
+    return send_file(io.BytesIO(entry["workbook"]),
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        as_attachment=True, download_name="GST_2B_Purchase_Reconciliation.xlsx")
 
 
 def read_named_table(workbook, table_name):
