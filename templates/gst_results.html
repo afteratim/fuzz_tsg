@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% block title %}GST Reconciliation Report · Private Document Analyzer{% endblock %}
+{% block content %}
+<div class="welcome">
+  <a class="back-link" href="{{ url_for('gst_reconcile') }}">← New reconciliation</a>
+  <div class="pill"><span class="dot"></span> GST reconciliation report</div>
+  <h1>Reconciliation Results</h1>
+  <p class="muted">Review discrepancies, filter by category, and download the complete Excel workbook.</p>
+</div>
+
+<section class="info-grid gst-summary">
+  <article class="info-card"><span class="card-icon">▤</span><h3>Purchase rows</h3><p class="gst-number">{{ report.pur_count }}</p></article>
+  <article class="info-card"><span class="card-icon">⇄</span><h3>2B rows</h3><p class="gst-number">{{ report.portal_count }}</p></article>
+  <article class="info-card"><span class="card-icon">✓</span><h3>Matched</h3><p class="gst-number">{{ summary_counts.get('Matched', 0) }}</p></article>
+  <article class="info-card"><span class="card-icon">!</span><h3>Needs review</h3><p class="gst-number">{{ summary_counts.get('All Discrepancies', 0) }}</p></article>
+</section>
+
+<section class="chat-card">
+  <div class="assistant-row">
+    <div class="avatar">!</div>
+    <div class="bubble">
+      <strong>What should I check first?</strong>
+      <p>Prioritize tax/value differences, invoices missing from either source, GSTIN mismatches, duplicates, and old bills. These are review flags—not automatic conclusions that an invoice or ITC is legally incorrect.</p>
+    </div>
+  </div>
+  <div class="gst-count-grid">
+    {% for category, count in summary_counts.items() %}
+      {% if category not in ['All Discrepancies', 'Validation warnings', 'Duplicate / mismatch review entries'] %}
+      <button type="button" class="gst-count-card" data-filter-category="{{ category|e }}">
+        <span>{{ category }}</span><strong>{{ count }}</strong>
+      </button>
+      {% endif %}
+    {% endfor %}
+    <button type="button" class="gst-count-card" data-filter-category="__all_discrepancies__">
+      <span>All Discrepancies</span><strong>{{ summary_counts.get('All Discrepancies', 0) }}</strong>
+    </button>
+  </div>
+  <p class="muted tiny">Amount tolerance: ₹{{ "%.2f"|format(report.tolerance) }} per compared field. Difference convention: 2B minus Purchase.</p>
+  <a class="primary" href="{{ url_for('download_gst_reconciliation', token=token) }}" style="display:inline-block;text-decoration:none">Download complete Excel report ↓</a>
+</section>
+
+<section class="chat-card">
+  <h2>Filter reconciliation records</h2>
+  <div class="gst-filters">
+    <label>Discrepancy category
+      <select id="gst-category-filter">
+        <option value="all">All records</option>
+        <option value="__all_discrepancies__">All discrepancies only</option>
+        {% for category in categories %}
+        <option value="{{ category }}">{{ category }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Search party / GSTIN / invoice
+      <input id="gst-search" type="search" placeholder="Type to search…">
+    </label>
+    <label>Priority
+      <select id="gst-priority-filter">
+        <option value="all">All priorities</option>
+        <option value="high">High — missing / tax / GSTIN</option>
+        <option value="review">Review — duplicates / uncertain</option>
+        <option value="other">Other discrepancies</option>
+      </select>
+    </label>
+  </div>
+  <p id="gst-visible-count" class="muted tiny" aria-live="polite"></p>
+  <div class="table-wrap">
+    <table class="data-table" id="gst-results-table">
+      <thead><tr>
+        <th>Priority</th><th>Remark</th><th>Party</th><th>GSTIN</th><th>Purchase invoice</th><th>2B invoice</th>
+        <th>Taxable diff</th><th>Invoice value diff</th><th>IGST diff</th><th>CGST diff</th><th>SGST diff</th>
+        <th>What is the problem?</th><th>What to check</th>
+      </tr></thead>
+      <tbody>
+      {% for line in lines %}
+        {% set remark = line.remark %}
+        {% set high = remark in ['Not in Tally', 'Not on Portal', 'Not Matched', 'GSTIN Mismatch - Review'] %}
+        {% set review = ('Review' in remark) or ('Duplicate' in remark) %}
+        <tr data-category="{{ remark }}" data-priority="{{ 'review' if review else ('high' if high else ('other' if remark != 'Matched' else 'matched')) }}">
+          <td>{% if review %}Review{% elif high %}High{% elif remark == 'Matched' %}OK{% else %}Medium{% endif %}</td>
+          <td><strong>{{ remark }}</strong></td>
+          <td>{{ line.name }}</td><td>{{ line.gstin }}</td><td>{{ line.invoice_pur }}</td><td>{{ line.invoice_2b }}</td>
+          <td>{{ "₹{:,.2f}".format(line.taxable_diff) if line.taxable_diff is not none else "—" }}</td>
+          <td>{{ "₹{:,.2f}".format(line.invoice_value_diff) if line.invoice_value_diff is not none else "—" }}</td>
+          <td>{{ "₹{:,.2f}".format(line.igst_diff) if line.igst_diff is not none else "—" }}</td>
+          <td>{{ "₹{:,.2f}".format(line.cgst_diff) if line.cgst_diff is not none else "—" }}</td>
+          <td>{{ "₹{:,.2f}".format(line.sgst_diff) if line.sgst_diff is not none else "—" }}</td>
+          <td>{{ line.explanation }}</td><td>{{ line.action }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+<style>
+.gst-number{font-size:1.7rem;font-weight:700;margin:0}
+.gst-count-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:10px;margin:18px 0}
+.gst-count-card{display:flex;flex-direction:column;gap:8px;text-align:left;padding:12px;border:1px solid var(--border,#ddd);border-radius:12px;background:var(--card,#fff);color:inherit;cursor:pointer}
+.gst-count-card strong{font-size:1.4rem}.gst-count-card:hover{outline:2px solid #789}
+.gst-filters{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin:14px 0}
+.gst-filters label{display:flex;flex-direction:column;gap:6px;font-weight:600}
+.gst-filters input,.gst-filters select{padding:10px;border:1px solid #bbb;border-radius:8px;max-width:100%;font:inherit}
+.table-wrap{overflow:auto;max-width:100%}
+.data-table{border-collapse:collapse;width:100%;min-width:1450px;font-size:.88rem}
+.data-table th,.data-table td{padding:9px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top;max-width:340px}
+.data-table th{position:sticky;top:0;background:var(--card,#fff);z-index:1}
+.data-table tr[data-priority="high"] td:first-child{font-weight:700}
+.data-table tr[data-priority="review"] td:first-child{font-weight:700}
+</style>
+<script src="{{ url_for('static', filename='gst_results.js') }}" defer></script>
+{% endblock %}
