@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}GST Reconciliation · Private Document Analyzer{% endblock %}
+{% block content %}
+<div class="welcome">
+  <a class="back-link" href="{{ url_for('index') }}">← Back to workspace</a>
+  <div class="pill"><span class="dot"></span> GST reconciliation</div>
+  <h1>GSTR-2B vs Purchase Register</h1>
+  <p class="muted">Upload one .xlsx workbook with two Excel Tables: <strong>Pur</strong> and your GSTR-2B table. The app compares GSTIN + invoice number, applies ₹2 tolerance per amount field, and exports a multi-sheet Excel report.</p>
+</div>
+<section class="chat-card">
+  <h2>Upload workbook</h2>
+  <form method="post" action="{{ url_for('run_gst_reconciliation') }}" enctype="multipart/form-data" class="upload-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <label class="file-drop" for="workbook">
+      <span class="upload-icon">↑</span>
+      <strong>Select one Excel workbook</strong>
+      <span class="muted">.xlsx only · maximum 25 MB</span>
+      <span class="tiny">Both named tables must be inside the same workbook.</span>
+    </label>
+    <input id="workbook" name="workbook" type="file" required accept=".xlsx">
+    <div id="selected-files" class="selected-files">No file selected</div>
+    <button class="primary" type="submit">Reconcile GST data <span>→</span></button>
+  </form>
+</section>
+<section class="info-grid">
+  <article class="info-card"><span class="card-icon">⇄</span><h3>Matching</h3><p>GSTIN + normalized invoice number. Invoice-only overlaps are flagged for possible GSTIN mismatch. Duplicate keys are not auto-matched.</p></article>
+  <article class="info-card"><span class="card-icon">₹</span><h3>Differences</h3><p>2B minus Pur for taxable value, invoice value, IGST, CGST, and SGST. ₹2 tolerance is applied to each compared amount.</p></article>
+  <article class="info-card"><span class="card-icon">▤</span><h3>Excel output</h3><p>Summary, Reconciliation, Missing in 2B, Missing in Purchase, Tax Differences, Duplicates & Review, Duplicate Keys, and Validation.</p></article>
+</section>
+<p class="notice"><strong>Excel table names:</strong> The purchase table must be named <strong>Pur</strong>. Excel versions may not allow a table name starting with a number, so name the portal table <strong>Table2B</strong> (or <strong>T2B</strong>) if <strong>2B</strong> is rejected. The analyzer accepts these aliases. Required columns: DATE, Particulars, Supplier Invoice No., GSTIN/UIN, TAXABLE VALUE, INV VALUE, IGST, CGST, SGST.</p>
+<p class="notice">Invoice normalization ignores case and whitespace but preserves punctuation and leading zeros to avoid unsafe automatic matches. Review flagged invoices and validation warnings before using the report for GST decisions.</p>
+<script src="{{ url_for('static', filename='app.js') }}" defer></script>
+{% endblock %}
