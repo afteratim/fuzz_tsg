@@ -139,6 +139,46 @@ def health():
     return {"status": "ok"}, 200
 
 
+def _self_ping_loop():
+    """Optionally ping this service's public health endpoint to reduce idle sleep.
+
+    Enable with ENABLE_SELF_PING=true and PUBLIC_BASE_URL=https://your-service.onrender.com.
+    Render may still suspend Free services; this is best-effort, not a guarantee.
+    """
+    import urllib.request
+    interval = max(300, int(os.environ.get("SELF_PING_INTERVAL_SECONDS", "600")))
+    base_url = os.environ.get("PUBLIC_BASE_URL", "").strip().rstrip("/")
+    if not base_url:
+        logger.warning("Self-ping enabled but PUBLIC_BASE_URL is not configured.")
+        return
+    health_url = base_url + "/health"
+    while True:
+        time.sleep(interval)
+        try:
+            req = urllib.request.Request(health_url, headers={"User-Agent": "PrivateDocumentAnalyzer-SelfPing/1.0"})
+            with urllib.request.urlopen(req, timeout=15) as response:
+                response.read(64)
+        except Exception as exc:
+            # Avoid logging URLs or response bodies; only log exception type.
+            logger.warning("Self-ping request failed (type=%s).", type(exc).__name__)
+
+
+def _start_self_ping_if_enabled():
+    if os.environ.get("ENABLE_SELF_PING", "false").strip().lower() not in {"1", "true", "yes", "on"}:
+        return
+    import threading
+    # Gunicorn is configured for one worker in this project. Guard against duplicate
+    # startup within a process (for example, during local development reloads).
+    if getattr(app, "_self_ping_started", False):
+        return
+    app._self_ping_started = True
+    thread = threading.Thread(target=_self_ping_loop, name="self-ping", daemon=True)
+    thread.start()
+
+
+_start_self_ping_if_enabled()
+
+
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if not APP_PASSWORD:
@@ -341,6 +381,16 @@ def gst_date(value):
     return text
 
 
+def parse_gst_date(value):
+    """Parse normalized DD-MM-YYYY dates for chronological comparison."""
+    if not value:
+        return None
+    try:
+        return datetime.strptime(str(value).strip(), "%d-%m-%Y").date()
+    except (TypeError, ValueError):
+        return None
+
+
 def gst_record_view(record):
     return {
         "date": gst_date(gst_field(record, "DATE")),
@@ -400,6 +450,10 @@ def reconcile_gst_tables(pur_records, portal_records, tolerance=2.0):
             line["remark"] = "Matched"
         reconciliation.append(line)
 
+    # Earliest valid date in Purchase register, used for Old Bill Filed classification.
+    pur_dates = [parsed for row in pur if (parsed := parse_gst_date(row["date"])) is not None]
+    min_pur_date = min(pur_dates) if pur_dates else None
+
     # Check invoice-only overlaps for possible GSTIN mismatch, but do not auto-match them.
     remaining_pur = [i for i in range(len(pur)) if i not in pur_used]
     remaining_portal = [j for j in range(len(portal)) if j not in portal_used]
@@ -429,7 +483,14 @@ def reconcile_gst_tables(pur_records, portal_records, tolerance=2.0):
             reconciliation.append(make_gst_line(None, portal[j], "GSTIN Mismatch - Review", tolerance, "Same invoice number found in Pur with a different GSTIN"))
             portal_used.add(j)
         else:
-            reconciliation.append(make_gst_line(None, portal[j], "Not in Tally", tolerance, "No corresponding invoice found in Pur"))
+            portal_date = parse_gst_date(portal[j]["date"])
+            if min_pur_date and portal_date and portal_date < min_pur_date:
+                reconciliation.append(make_gst_line(
+                    None, portal[j], "Old Bill Filed", tolerance,
+                    f"Invoice date {portal[j]['date']} is earlier than the earliest Purchase date {min_pur_date.strftime('%d-%m-%Y')}. Check whether this is an old bill filed in a later period."
+                ))
+            else:
+                reconciliation.append(make_gst_line(None, portal[j], "Not in Tally", tolerance, "No corresponding invoice found in Pur"))
             portal_used.add(j)
 
     for side, rows in (("Pur", pur), ("2B", portal)):
@@ -486,24 +547,53 @@ def build_gst_workbook(report):
     write_sheet(ws, [c[0] for c in columns], [[line.get(c[1]) for c in columns] for line in report["reconciliation"]])
     missing_2b = [x for x in report["reconciliation"] if x["remark"] == "Not on Portal"]
     missing_pur = [x for x in report["reconciliation"] if x["remark"] == "Not in Tally"]
+    old_bills = [x for x in report["reconciliation"] if x["remark"] == "Old Bill Filed"]
     tax_diffs = [x for x in report["reconciliation"] if any(x[k] is not None and x[k] > report["tolerance"] for k in ("taxable_diff_abs", "invoice_value_diff_abs", "igst_diff_abs", "cgst_diff_abs", "sgst_diff_abs"))]
-    review = [x for x in report["reconciliation"] if "Review" in x["remark"]]
+    review = [x for x in report["reconciliation"] if "Review" in x["remark"] or x["remark"] == "Duplicate / Review Required"]
+    all_discrepancies = [x for x in report["reconciliation"] if x["remark"] != "Matched"]
     write_gst_subset(wb, "Missing in 2B", columns, missing_2b)
     write_gst_subset(wb, "Missing in Purchase", columns, missing_pur)
+    write_gst_subset(wb, "Old Bill Filed", columns, old_bills)
     write_gst_subset(wb, "Tax Differences", columns, tax_diffs)
     write_gst_subset(wb, "Duplicates & Review", columns, review)
+    write_gst_subset(wb, "All Discrepancies", columns, all_discrepancies)
     write_sheet(wb.create_sheet("Validation"), ["Source", "Excel Row in Source Table", "GSTIN", "Invoice No.", "Validation Warning"], report["validation"])
     write_sheet(wb.create_sheet("Duplicate Keys"), ["GSTIN / GSTINs", "Normalized Invoice No.", "Source", "Count", "Review Note"], report["duplicates"])
     summary = wb.create_sheet("Summary", 0)
-    summary_rows = [["GST 2B and Purchase Reconciliation", "Value"], ["Records in Pur", report["pur_count"]], ["Records in 2B", report["portal_count"]], ["Amount tolerance (₹ per field)", report["tolerance"]]]
-    for label in sorted(report["counts"]): summary_rows.append([label, report["counts"][label]])
-    summary_rows.extend([["Validation warnings", len(report["validation"])], ["Duplicate / mismatch review entries", len(report["duplicates"])], ["Difference convention", "2B minus Pur; positive means 2B is higher"], ["Matching rule", "Normalized GSTIN + invoice number; invoice-only overlap flags possible GSTIN mismatch; duplicates are not auto-matched"]])
-    for row in summary_rows: summary.append(row)
+    summary_rows = [["GST 2B and Purchase Reconciliation", "Count / Value"], ["Records in Pur", report["pur_count"]], ["Records in 2B", report["portal_count"]], ["Amount tolerance (₹ per field)", report["tolerance"]]]
+    for label in sorted(report["counts"]):
+        summary_rows.append([label, report["counts"][label]])
+    summary_rows.extend([["Old Bill Filed", len(old_bills)], ["All Discrepancies", len(all_discrepancies)],
+                         ["Validation warnings", len(report["validation"])], ["Duplicate / mismatch review entries", len(report["duplicates"])],
+                         ["Difference convention", "2B minus Pur; positive means 2B is higher"],
+                         ["Matching rule", "Normalized GSTIN + invoice number; invoice-only overlap flags possible GSTIN mismatch; duplicates are not auto-matched"]])
+    for row in summary_rows:
+        summary.append(row)
     style_sheet(summary)
+    sheet_links = {
+        "Not on Portal": "Missing in 2B",
+        "Not in Tally": "Missing in Purchase",
+        "Old Bill Filed": "Old Bill Filed",
+        "Not Matched": "Tax Differences",
+        "Date Difference": "All Discrepancies",
+        "GSTIN Mismatch - Review": "Duplicates & Review",
+        "Duplicate / Review Required": "Duplicates & Review",
+        "Validation warnings": "Validation",
+        "Duplicate / mismatch review entries": "Duplicate Keys",
+        "All Discrepancies": "All Discrepancies",
+    }
+    for r in range(2, summary.max_row + 1):
+        label = str(summary.cell(r, 1).value or "")
+        target = sheet_links.get(label)
+        if not target and label in {"Taxable Value Difference", "Tax Amount Difference", "Invoice Value Difference", "Tax Differences"}:
+            target = "Tax Differences"
+        if target and target in wb.sheetnames:
+            summary.cell(r, 1).hyperlink = f"#'{target}'!A1"
+            summary.cell(r, 1).style = "Hyperlink"
     for row in summary.iter_rows(min_row=2, min_col=1, max_col=2):
         row[0].font = Font(bold=True)
     for sheet in wb.worksheets:
-        sheet.freeze_panes = "A2" if sheet.title != "Summary" else "A2"
+        sheet.freeze_panes = "A2"
     buffer = io.BytesIO(); wb.save(buffer); return buffer.getvalue()
 
 def write_gst_subset(wb, title, columns, lines):
