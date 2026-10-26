@@ -1,3 +1,227 @@
+import os
+import re
+import csv
+import io
+import hmac
+import secrets
+import logging
+import tempfile
+import time
+from collections import defaultdict, deque
+from pathlib import Path
+from functools import wraps
+from zipfile import BadZipFile
+
+from flask import Flask, request, session, redirect, url_for, render_template, flash, send_file, abort
+from flask_wtf.csrf import CSRFProtect
+from werkzeug.utils import secure_filename
+from werkzeug.exceptions import RequestEntityTooLarge
+from werkzeug.middleware.proxy_fix import ProxyFix
+
+from extractors import extract_document, SUPPORTED_EXTENSIONS
+
+APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
+APP_USERNAME = os.environ.get("APP_USERNAME", "admin")
+SECRET_KEY = os.environ.get("SECRET_KEY", "")
+MAX_FILE_BYTES = 25 * 1024 * 1024
+MAX_REQUEST_BYTES = 52 * 1024 * 1024
+MAX_FILES = 2
+ALLOWED_EXTENSIONS = SUPPORTED_EXTENSIONS
+
+if not SECRET_KEY:
+    # Local development fallback only. Configure SECRET_KEY in Render for stable secure sessions.
+    SECRET_KEY = secrets.token_hex(32)
+
+app = Flask(__name__)
+app.config.update(
+    SECRET_KEY=SECRET_KEY,
+    MAX_CONTENT_LENGTH=MAX_REQUEST_BYTES,
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SECURE=os.environ.get("COOKIE_SECURE", "true").lower() == "true",
+    SESSION_COOKIE_SAMESITE="Lax",
+    PERMANENT_SESSION_LIFETIME=1800,
+    WTF_CSRF_TIME_LIMIT=3600,
+    # Render terminates HTTPS at its proxy. The CSRF token remains enabled;
+    # disable only strict Referer validation because some browsers/privacy settings omit it.
+    WTF_CSRF_SSL_STRICT=False,
+)
+CSRFProtect(app)
+# Trust the single reverse proxy in front of this Render service for HTTPS scheme detection.
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+
+# Avoid access logs containing query strings or other request details. Do not log user data.
+logging.getLogger("werkzeug").setLevel(logging.ERROR)
+logging.basicConfig(level=os.environ.get("LOG_LEVEL", "WARNING"))
+logger = logging.getLogger("private_analyzer")
+
+# Basic in-memory login throttling. With the configured single Gunicorn worker,
+# attempts are tracked for this process only; this is not a replacement for MFA/WAF.
+_LOGIN_ATTEMPTS = defaultdict(deque)
+_LOGIN_WINDOW_SECONDS = 900
+_LOGIN_MAX_ATTEMPTS = 8
+
+
+def login_rate_limited(client_key):
+    now = time.time()
+    attempts = _LOGIN_ATTEMPTS[client_key]
+    while attempts and now - attempts[0] > _LOGIN_WINDOW_SECONDS:
+        attempts.popleft()
+    return len(attempts) >= _LOGIN_MAX_ATTEMPTS
+
+
+def login_required(fn):
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        if not session.get("authenticated"):
+            return redirect(url_for("login"))
+        return fn(*args, **kwargs)
+    return wrapped
+
+
+def allowed_file(filename):
+    return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+def validate_file_signature(path, suffix):
+    """Basic file-signature checks; not a substitute for parser isolation or malware scanning."""
+    with open(path, "rb") as handle:
+        head = handle.read(16)
+    if suffix == ".pdf":
+        valid = head.startswith(b"%PDF-")
+    elif suffix in {".xlsx", ".xlsm", ".xltx", ".xltm", ".docx"}:
+        valid = head.startswith(b"PK\x03\x04")
+    elif suffix in {".jpg", ".jpeg"}:
+        valid = head.startswith(b"\xff\xd8\xff")
+    elif suffix == ".png":
+        valid = head.startswith(b"\x89PNG\r\n\x1a\n")
+    elif suffix == ".gif":
+        valid = head.startswith((b"GIF87a", b"GIF89a"))
+    elif suffix in {".tif", ".tiff"}:
+        valid = head.startswith((b"II*\x00", b"MM\x00*", b"II+\x00", b"MM\x00+"))
+    elif suffix == ".bmp":
+        valid = head.startswith(b"BM")
+    elif suffix == ".webp":
+        valid = len(head) >= 12 and head[:4] == b"RIFF" and head[8:12] == b"WEBP"
+    elif suffix == ".rtf":
+        valid = head.lstrip().startswith(b"{\\rtf")
+    else:
+        # CSV/TSV/TXT can legitimately have arbitrary text bytes.
+        valid = True
+    if not valid:
+        raise ValueError(f"The file contents do not match the .{suffix.lstrip('.')} extension.")
+
+
+@app.after_request
+def security_headers(response):
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    # Self-hosted assets only; no inline scripts, external fonts, analytics, or CDNs.
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; style-src 'self'; script-src 'self'; "
+        "img-src 'self' data:; connect-src 'self'; object-src 'none'; "
+        "base-uri 'self'; frame-ancestors 'none'; form-action 'self'"
+    )
+    if request.is_secure or os.environ.get("RENDER", ""):
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
+
+
+@app.route("/health")
+def health():
+    return {"status": "ok"}, 200
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if not APP_PASSWORD:
+        return render_template("setup_required.html"), 503
+    if request.method == "POST":
+        # Render is expected to terminate HTTPS at its edge. Use the apparent client IP
+        # only as an in-memory rate-limit key; never log or persist it.
+        client_key = request.headers.get("X-Forwarded-For", "unknown").split(",", 1)[0].strip()[:64]
+        if login_rate_limited(client_key):
+            flash("Too many login attempts. Wait 15 minutes before trying again.", "error")
+            return render_template("login.html"), 429
+        username = request.form.get("username", "")
+        password = request.form.get("password", "")
+        user_ok = hmac.compare_digest(username.encode(), APP_USERNAME.encode())
+        pass_ok = hmac.compare_digest(password.encode(), APP_PASSWORD.encode())
+        if user_ok and pass_ok:
+            _LOGIN_ATTEMPTS.pop(client_key, None)
+            session.clear()
+            session["authenticated"] = True
+            session.permanent = True
+            return redirect(url_for("index"))
+        _LOGIN_ATTEMPTS[client_key].append(time.time())
+        # Do not log credentials or submitted form data.
+        flash("Login failed. Check your credentials and try again.", "error")
+    return render_template("login.html")
+
+
+@app.route("/logout", methods=["POST"])
+@login_required
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
+
+@app.route("/", methods=["GET"])
+@login_required
+def index():
+    return render_template("index.html", extensions=", ".join(sorted(ALLOWED_EXTENSIONS)))
+
+
+@app.route("/analyze", methods=["POST"])
+@login_required
+def analyze():
+    uploads = request.files.getlist("documents")
+    if len(uploads) != 2 or any(not f or not f.filename for f in uploads):
+        flash("Choose exactly two documents to compare.", "error")
+        return redirect(url_for("index"))
+
+    prepared = []
+    try:
+        with tempfile.TemporaryDirectory(prefix="pda_") as temp_dir:
+            root = Path(temp_dir)
+            for upload in uploads:
+                original_name = upload.filename or "document"
+                safe_name = secure_filename(original_name)
+                if not safe_name or not allowed_file(safe_name):
+                    raise ValueError(f"Unsupported file type for {original_name}.")
+                # Stream to temporary storage while enforcing the per-file cap.
+                destination = root / (secrets.token_hex(8) + "_" + safe_name)
+                total = 0
+                with destination.open("wb") as out:
+                    while True:
+                        chunk = upload.stream.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        if total > MAX_FILE_BYTES:
+                            raise ValueError(f"{safe_name} exceeds the 25 MB per-file limit.")
+                        out.write(chunk)
+                if total == 0:
+                    raise ValueError(f"{safe_name} is empty.")
+                validate_file_signature(destination, destination.suffix.lower())
+                prepared.append((original_name, destination))
+
+            extracted = []
+            for name, path in prepared:
+                extracted.append((name, extract_document(path, name)))
+
+            name_a, doc_a = extracted[0]
+            name_b, doc_b = extracted[1]
+            result = compare_documents(doc_a, doc_b, name_a, name_b)
+            # Result is rendered immediately; uploads and intermediate files are removed
+            # when TemporaryDirectory exits. Results are not persisted in a database/session.
+            return render_template("results.html", result=result)
+    except ValueError as exc:
+        flash(str(exc), "error")
+        return redirect(url_for("index"))
     except (BadZipFile, UnicodeDecodeError, csv.Error) as exc:
         logger.warning("A document could not be parsed (type=%s).", type(exc).__name__)
         flash("A file could not be read. Check that it is valid and not password-protected.", "error")
