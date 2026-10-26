@@ -36,7 +36,7 @@
     </button>
   </div>
   <p class="muted tiny">Amount tolerance: ₹{{ "%.2f"|format(report.tolerance) }} per compared field. Difference convention: 2B minus Purchase.</p>
-  <a class="primary" href="{{ url_for('download_gst_reconciliation', token=token) }}" style="display:inline-block;text-decoration:none">Download complete Excel report ↓</a>
+  <a class="primary gst-download" href="{{ url_for('download_gst_reconciliation', token=token) }}">Download complete Excel report ↓</a>
 </section>
 
 <section class="chat-card">
@@ -67,9 +67,9 @@
   <div class="table-wrap">
     <table class="data-table" id="gst-results-table">
       <thead><tr>
-        <th>Priority</th><th>Remark</th><th>Party</th><th>GSTIN</th><th>Purchase invoice</th><th>2B invoice</th>
-        <th>Taxable diff</th><th>Invoice value diff</th><th>IGST diff</th><th>CGST diff</th><th>SGST diff</th>
-        <th>What is the problem?</th><th>What to check</th>
+        <th><button type="button" class="sort-button" data-sort="0">Priority <span>↕</span></button></th><th><button type="button" class="sort-button" data-sort="1">Remark <span>↕</span></button></th><th><button type="button" class="sort-button" data-sort="2">Party <span>↕</span></button></th><th><button type="button" class="sort-button" data-sort="3">GSTIN <span>↕</span></button></th><th><button type="button" class="sort-button" data-sort="4">Purchase invoice <span>↕</span></button></th><th><button type="button" class="sort-button" data-sort="5">2B invoice <span>↕</span></button></th>
+        <th><button type="button" class="sort-button" data-sort="6">Taxable diff <span>↕</span></button></th><th><button type="button" class="sort-button" data-sort="7">Invoice value diff <span>↕</span></button></th><th><button type="button" class="sort-button" data-sort="8">IGST diff <span>↕</span></button></th><th><button type="button" class="sort-button" data-sort="9">CGST diff <span>↕</span></button></th><th><button type="button" class="sort-button" data-sort="10">SGST diff <span>↕</span></button></th>
+        <th class="problem-column"><button type="button" class="sort-button" data-sort="11">What is the problem? <span>↕</span></button></th><th><button type="button" class="sort-button" data-sort="12">What to check <span>↕</span></button></th>
       </tr></thead>
       <tbody>
       {% for line in lines %}
@@ -92,20 +92,6 @@
     </table>
   </div>
 </section>
-<style>
-.gst-number{font-size:1.7rem;font-weight:700;margin:0}
-.gst-count-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:10px;margin:18px 0}
-.gst-count-card{display:flex;flex-direction:column;gap:8px;text-align:left;padding:12px;border:1px solid var(--border,#ddd);border-radius:12px;background:var(--card,#fff);color:inherit;cursor:pointer}
-.gst-count-card strong{font-size:1.4rem}.gst-count-card:hover{outline:2px solid #789}
-.gst-filters{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin:14px 0}
-.gst-filters label{display:flex;flex-direction:column;gap:6px;font-weight:600}
-.gst-filters input,.gst-filters select{padding:10px;border:1px solid #bbb;border-radius:8px;max-width:100%;font:inherit}
-.table-wrap{overflow:auto;max-width:100%}
-.data-table{border-collapse:collapse;width:100%;min-width:1450px;font-size:.88rem}
-.data-table th,.data-table td{padding:9px;border-bottom:1px solid #ddd;text-align:left;vertical-align:top;max-width:340px}
-.data-table th{position:sticky;top:0;background:var(--card,#fff);z-index:1}
-.data-table tr[data-priority="high"] td:first-child{font-weight:700}
-.data-table tr[data-priority="review"] td:first-child{font-weight:700}
-</style>
+<link rel="stylesheet" href="{{ url_for('static', filename='gst_results.css') }}">
 <script src="{{ url_for('static', filename='gst_results.js') }}" defer></script>
 {% endblock %}
