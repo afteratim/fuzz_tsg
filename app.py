@@ -624,13 +624,17 @@ def reconcile_gst_tables(pur_records, portal_records, tolerance=2.0, fuzzy_enabl
 
                 left_tax_parts = [left.get(field) for field in ("igst", "cgst", "sgst")]
                 right_tax_parts = [right.get(field) for field in ("igst", "cgst", "sgst")]
-                if any(value is None for value in left_tax_parts + right_tax_parts):
+                # In GST registers, blank tax-component cells commonly mean zero
+                # when another component is populated (e.g. IGST invoice with
+                # blank CGST/SGST). Treat those blanks as zero, but keep the total
+                # tax as missing when all three components are blank on either side.
+                if all(value is None for value in left_tax_parts) or all(value is None for value in right_tax_parts):
                     missing_amounts.append("total tax")
                     total_tax_left = total_tax_right = None
                     total_tax_difference = None
                 else:
-                    total_tax_left = sum(left_tax_parts)
-                    total_tax_right = sum(right_tax_parts)
+                    total_tax_left = sum(value or 0.0 for value in left_tax_parts)
+                    total_tax_right = sum(value or 0.0 for value in right_tax_parts)
                     total_tax_difference = abs(total_tax_right - total_tax_left)
                     if round(total_tax_difference, 2) != 0:
                         failed_amounts.append(("total tax", total_tax_difference, 0.0))
