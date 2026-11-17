@@ -326,11 +326,15 @@ def gst_explanation(line):
                 "Check the original invoice date and confirm whether the date difference is expected.")
     if remark == "Not Matched":
         fields = []
-        for label, key in [("Taxable value", "taxable_diff"), ("Invoice value", "invoice_value_diff"),
-                           ("IGST", "igst_diff"), ("CGST", "cgst_diff"), ("SGST", "sgst_diff")]:
+        field_limits = [
+            ("Taxable value", "taxable_diff", 10.0),
+            ("Invoice value", "invoice_value_diff", 10.0),
+            ("Combined tax", "total_tax_diff", 2.0),
+        ]
+        for label, key, limit in field_limits:
             value = line.get(key)
-            if value is not None and abs(value) > line.get("tolerance", 2.0):
-                fields.append(f"{label} differs by ₹{value:,.2f} (2B minus Pur)")
+            if value is not None and abs(value) > limit:
+                fields.append(f"{label} differs by ₹{value:,.2f} (2B minus Pur; limit ₹{limit:,.2f})")
         if fields:
             details.append("; ".join(fields))
         return (("Matched invoice, but " + "; ".join(details) + ".") if details else "One or more compared fields differ.",
@@ -547,8 +551,18 @@ def reconcile_gst_tables(pur_records, portal_records, tolerance=2.0, fuzzy_enabl
         i, j = pur_index[k][0], portal_index[k][0]
         pur_used.add(i); portal_used.add(j)
         line = make_gst_line(pur[i], portal[j], "Matched", tolerance, "")
-        if line["taxable_diff_abs"] > tolerance or any(line[f"{tax.lower()}_diff_abs"] > tolerance for tax in ("IGST", "CGST", "SGST")) or line["invoice_value_diff_abs"] > 10.0:
+        # Apply field-specific tolerances consistently. abs() makes the test
+        # symmetric for positive and negative (2B - Purchase) differences.
+        amounts_outside_tolerance = (
+            (line["taxable_diff"] is not None and abs(line["taxable_diff"]) > 10.0)
+            or (line["invoice_value_diff"] is not None and abs(line["invoice_value_diff"]) > 10.0)
+            or (line["total_tax_diff"] is not None and abs(line["total_tax_diff"]) > 2.0)
+        )
+        if amounts_outside_tolerance:
             line["remark"] = "Not Matched"
+        elif line["total_tax_diff"] is None:
+            line["remark"] = "Review Required"
+            line["detail"] = "Combined tax amount is unavailable on one or both sides; verify the source records."
         elif line["date_pur"] != line["date_2b"]:
             line["remark"] = "Date Difference"
         else:
@@ -622,15 +636,13 @@ def reconcile_gst_tables(pur_records, portal_records, tolerance=2.0, fuzzy_enabl
                     if taxable_difference > 10.0:
                         failed_amounts.append(("taxable", taxable_difference, 10.0))
 
-                invoice_value_left = left.get("invoice_value")
-                invoice_value_right = right.get("invoice_value")
-                if invoice_value_left is None or invoice_value_right is None:
+                invoice_left, invoice_right = left.get("invoice_value"), right.get("invoice_value")
+                if invoice_left is None or invoice_right is None:
                     missing_amounts.append("invoice value")
-                    invoice_value_difference = None
                 else:
-                    invoice_value_difference = abs(invoice_value_right - invoice_value_left)
-                    if invoice_value_difference > 10.0:
-                        failed_amounts.append(("invoice value", invoice_value_difference, 10.0))
+                    invoice_difference = abs(invoice_right - invoice_left)
+                    if invoice_difference > 10.0:
+                        failed_amounts.append(("invoice value", invoice_difference, 10.0))
 
                 left_tax_parts = [left.get(field) for field in ("igst", "cgst", "sgst")]
                 right_tax_parts = [right.get(field) for field in ("igst", "cgst", "sgst")]
@@ -704,7 +716,7 @@ def reconcile_gst_tables(pur_records, portal_records, tolerance=2.0, fuzzy_enabl
             auto_ids.add((candidate["i"], candidate["j"]))
             fuzzy_matched_pairs.append(candidate)
             line = make_gst_line(pur[candidate["i"]], portal[candidate["j"]], "Fuzzy Matched", tolerance,
-                f"Fuzzy match accepted: invoice numbers {candidate['invoice_similarity']:.1f}% similar; same GSTIN; dates {candidate['date_gap']} day(s) apart (maximum 3); taxable difference within ₹10; invoice value difference within ₹10; combined tax (IGST + CGST + SGST) difference is within ₹2. Manual verification is still recommended.")
+                f"Fuzzy match accepted: invoice numbers {candidate['invoice_similarity']:.1f}% similar; same GSTIN; dates {candidate['date_gap']} day(s) apart (maximum 3); taxable value and invoice value differences are each within ₹10; combined tax (IGST + CGST + SGST) difference is within ₹2. Manual verification is still recommended.")
             line["invoice_similarity"] = candidate["invoice_similarity"]
             line["confidence"] = candidate["confidence"]
             reconciliation.append(line)
@@ -795,6 +807,12 @@ def make_gst_line(pur, portal, remark, tolerance, detail):
         return (b or 0.0) - (a or 0.0)
     taxable_diff, inv_diff = diff("taxable"), diff("invoice_value")
     tax_diffs = {tax: diff(tax.lower()) for tax in ("IGST", "CGST", "SGST")}
+    pur_tax_parts = [val(pur, field) for field in ("igst", "cgst", "sgst")]
+    portal_tax_parts = [val(portal, field) for field in ("igst", "cgst", "sgst")]
+    if pur and portal and not all(v is None for v in pur_tax_parts) and not all(v is None for v in portal_tax_parts):
+        total_tax_diff = sum(v or 0.0 for v in portal_tax_parts) - sum(v or 0.0 for v in pur_tax_parts)
+    else:
+        total_tax_diff = None
     name = (pur["name"] if pur and pur["name"] else (portal["name"] if portal else ""))
     return {
         "gstin": val(pur, "gstin") or val(portal, "gstin") or "", "name": name,
@@ -805,6 +823,7 @@ def make_gst_line(pur, portal, remark, tolerance, detail):
         "igst_pur": val(pur, "igst"), "igst_2b": val(portal, "igst"), "igst_diff": tax_diffs["IGST"], "igst_diff_abs": abs(tax_diffs["IGST"]) if tax_diffs["IGST"] is not None else 0,
         "cgst_pur": val(pur, "cgst"), "cgst_2b": val(portal, "cgst"), "cgst_diff": tax_diffs["CGST"], "cgst_diff_abs": abs(tax_diffs["CGST"]) if tax_diffs["CGST"] is not None else 0,
         "sgst_pur": val(pur, "sgst"), "sgst_2b": val(portal, "sgst"), "sgst_diff": tax_diffs["SGST"], "sgst_diff_abs": abs(tax_diffs["SGST"]) if tax_diffs["SGST"] is not None else 0,
+        "total_tax_diff": total_tax_diff,
         "remark": remark, "detail": detail, "tolerance": tolerance,
     }
 
@@ -823,7 +842,11 @@ def build_gst_workbook(report):
     missing_2b = [x for x in report["reconciliation"] if x["remark"] == "Not on Portal"]
     missing_pur = [x for x in report["reconciliation"] if x["remark"] == "Not in Tally"]
     old_bills = [x for x in report["reconciliation"] if x["remark"] == "Old Bill Filed"]
-    tax_diffs = [x for x in report["reconciliation"] if any(x[k] is not None and x[k] > report["tolerance"] for k in ("taxable_diff_abs", "invoice_value_diff_abs", "igst_diff_abs", "cgst_diff_abs", "sgst_diff_abs"))]
+    tax_diffs = [x for x in report["reconciliation"] if (
+        (x.get("taxable_diff") is not None and abs(x["taxable_diff"]) > 10.0)
+        or (x.get("invoice_value_diff") is not None and abs(x["invoice_value_diff"]) > 10.0)
+        or (x.get("total_tax_diff") is not None and abs(x["total_tax_diff"]) > 2.0)
+    )]
     review = [x for x in report["reconciliation"] if "Review" in x["remark"] or x["remark"] == "Duplicate / Review Required"]
     all_discrepancies = [x for x in report["reconciliation"] if x["remark"] not in ("Matched", "Fuzzy Matched")]
     write_gst_subset(wb, "Missing in 2B", columns, missing_2b)
@@ -850,7 +873,7 @@ def build_gst_workbook(report):
     summary_rows.extend([["Old Bill Filed", len(old_bills)], ["All Discrepancies", len(all_discrepancies)],
                          ["Validation warnings", len(report["validation"])], ["Duplicate / mismatch review entries", len(report["duplicates"])],
                          ["Difference convention", "2B minus Pur; positive means 2B is higher"],
-                         ["Matching rule", "Normalized GSTIN + invoice number; invoice-only overlap flags possible GSTIN mismatch; duplicates are not auto-matched"], ["Fuzzy matching enabled", "Yes" if report.get("fuzzy_enabled") else "No"], ["Fuzzy suggestions", len(report.get("fuzzy_suggestions", []))], ["Fuzzy matching rule", "Same GSTIN, invoice similarity >=75%, dates within 3 days; auto-match only when taxable difference <=₹10, combined IGST+CGST+SGST difference is within ₹2, and pairing is unambiguous; otherwise review"]])
+                         ["Matching rule", "Normalized GSTIN + invoice number; invoice-only overlap flags possible GSTIN mismatch; duplicates are not auto-matched"], ["Fuzzy matching enabled", "Yes" if report.get("fuzzy_enabled") else "No"], ["Fuzzy suggestions", len(report.get("fuzzy_suggestions", []))], ["Fuzzy matching rule", "Same GSTIN, invoice similarity >=75%, dates within 3 days; auto-match only when taxable value difference <=₹10, invoice value difference <=₹10, combined IGST+CGST+SGST difference <=₹2, all required amounts are available, and pairing is unambiguous; otherwise review"]])
     for row in summary_rows:
         summary.append(row)
     style_sheet(summary)
