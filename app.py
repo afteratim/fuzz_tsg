@@ -547,7 +547,7 @@ def reconcile_gst_tables(pur_records, portal_records, tolerance=2.0, fuzzy_enabl
         i, j = pur_index[k][0], portal_index[k][0]
         pur_used.add(i); portal_used.add(j)
         line = make_gst_line(pur[i], portal[j], "Matched", tolerance, "")
-        if line["taxable_diff_abs"] > tolerance or any(line[f"{tax.lower()}_diff_abs"] > tolerance for tax in ("IGST", "CGST", "SGST")) or line["invoice_value_diff_abs"] > tolerance:
+        if line["taxable_diff_abs"] > tolerance or any(line[f"{tax.lower()}_diff_abs"] > tolerance for tax in ("IGST", "CGST", "SGST")) or line["invoice_value_diff_abs"] > 10.0:
             line["remark"] = "Not Matched"
         elif line["date_pur"] != line["date_2b"]:
             line["remark"] = "Date Difference"
@@ -622,6 +622,16 @@ def reconcile_gst_tables(pur_records, portal_records, tolerance=2.0, fuzzy_enabl
                     if taxable_difference > 10.0:
                         failed_amounts.append(("taxable", taxable_difference, 10.0))
 
+                invoice_value_left = left.get("invoice_value")
+                invoice_value_right = right.get("invoice_value")
+                if invoice_value_left is None or invoice_value_right is None:
+                    missing_amounts.append("invoice value")
+                    invoice_value_difference = None
+                else:
+                    invoice_value_difference = abs(invoice_value_right - invoice_value_left)
+                    if invoice_value_difference > 10.0:
+                        failed_amounts.append(("invoice value", invoice_value_difference, 10.0))
+
                 left_tax_parts = [left.get(field) for field in ("igst", "cgst", "sgst")]
                 right_tax_parts = [right.get(field) for field in ("igst", "cgst", "sgst")]
                 # In GST registers, blank tax-component cells commonly mean zero
@@ -647,7 +657,7 @@ def reconcile_gst_tables(pur_records, portal_records, tolerance=2.0, fuzzy_enabl
                 invoice_value_diff = (right["invoice_value"] - left["invoice_value"]) if left["invoice_value"] is not None and right["invoice_value"] is not None else None
                 tax_detail = ", ".join(f"{field.upper()} ₹{diff:,.2f} (limit ₹{limit:,.2f})" for field, diff, limit in failed_amounts)
                 missing_detail = ", ".join(x.upper() for x in missing_amounts)
-                amount_note = ("Taxable difference is within ₹10 and combined tax (IGST + CGST + SGST) difference is within ₹2" if amounts_pass else "; ".join(x for x in [f"Over tolerance / mismatch: {tax_detail}" if tax_detail else "", f"Missing amounts: {missing_detail}" if missing_detail else ""] if x))
+                amount_note = ("Taxable difference is within ₹10, invoice value difference is within ₹10, and combined tax (IGST + CGST + SGST) difference is within ₹2" if amounts_pass else "; ".join(x for x in [f"Over tolerance / mismatch: {tax_detail}" if tax_detail else "", f"Missing amounts: {missing_detail}" if missing_detail else ""] if x))
                 candidates.append({
                     "i": i, "j": j, "gstin": left_gstin, "name": left["name"] or right["name"],
                     "invoice_pur": left["invoice"], "invoice_2b": right["invoice"],
@@ -694,7 +704,7 @@ def reconcile_gst_tables(pur_records, portal_records, tolerance=2.0, fuzzy_enabl
             auto_ids.add((candidate["i"], candidate["j"]))
             fuzzy_matched_pairs.append(candidate)
             line = make_gst_line(pur[candidate["i"]], portal[candidate["j"]], "Fuzzy Matched", tolerance,
-                f"Fuzzy match accepted: invoice numbers {candidate['invoice_similarity']:.1f}% similar; same GSTIN; dates {candidate['date_gap']} day(s) apart (maximum 3); taxable difference within ₹10; combined tax (IGST + CGST + SGST) difference is within ₹2. Manual verification is still recommended.")
+                f"Fuzzy match accepted: invoice numbers {candidate['invoice_similarity']:.1f}% similar; same GSTIN; dates {candidate['date_gap']} day(s) apart (maximum 3); taxable difference within ₹10; invoice value difference within ₹10; combined tax (IGST + CGST + SGST) difference is within ₹2. Manual verification is still recommended.")
             line["invoice_similarity"] = candidate["invoice_similarity"]
             line["confidence"] = candidate["confidence"]
             reconciliation.append(line)
