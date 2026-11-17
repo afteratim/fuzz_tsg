@@ -5,7 +5,7 @@
   <a class="back-link" href="{{ url_for('index') }}">← Back to workspace</a>
   <div class="pill"><span class="dot"></span> GST reconciliation</div>
   <h1>GSTR-2B vs Purchase Register</h1>
-  <p class="muted">Upload one .xlsx workbook with two Excel Tables: <strong>Pur</strong> and your GSTR-2B table. The app compares GSTIN + invoice number, applies ₹2 tolerance per amount field, and exports a multi-sheet Excel report.</p>
+  <p class="muted">Upload one .xlsx workbook with two Excel Tables: <strong>Pur</strong> and your GSTR-2B table. Exact matching remains unchanged with ₹2 tolerance. Optional fuzzy matching uses separate thresholds and is enabled only when you switch it on.</p>
 </div>
 <section class="chat-card">
   <h2>Upload workbook</h2>
@@ -20,7 +20,7 @@
     <input id="workbook" name="workbook" type="file" required accept=".xlsx">
     <div id="selected-files" class="selected-files">No file selected</div>
     <label class="fuzzy-toggle" for="fuzzy_enabled">
-      <span class="fuzzy-toggle-copy"><strong>Enable fuzzy invoice suggestions</strong><small>Optional second pass: same GSTIN, invoice similarity ≥85%, dates within 30 days. Suggestions are never auto-matched.</small></span>
+      <span class="fuzzy-toggle-copy"><strong>Enable fuzzy invoice suggestions</strong><small>Optional second pass: same GSTIN, invoice similarity ≥75%, dates within 30 days. Auto-matches only when taxable difference ≤₹10, each tax difference ≤₹2, and the one-to-one pairing is unambiguous; otherwise requires review.</small></span>
       <input id="fuzzy_enabled" name="fuzzy_enabled" type="checkbox" value="on">
       <span class="fuzzy-switch" aria-hidden="true"></span>
     </label>
@@ -33,7 +33,7 @@
   <article class="info-card"><span class="card-icon">▤</span><h3>Excel output</h3><p>Summary, Reconciliation, Missing in 2B, Missing in Purchase, Tax Differences, Duplicates & Review, Duplicate Keys, and Validation.</p></article>
 </section>
 <p class="notice"><strong>Excel table names:</strong> The purchase table must be named <strong>Pur</strong>. Excel versions may not allow a table name starting with a number, so name the portal table <strong>Table2B</strong> (or <strong>T2B</strong>) if <strong>2B</strong> is rejected. The analyzer accepts these aliases. Required columns: DATE, Particulars, Supplier Invoice No., GSTIN/UIN, TAXABLE VALUE, INV VALUE, IGST, CGST, SGST.</p>
-<p class="notice">Invoice normalization ignores case and whitespace but preserves punctuation and leading zeros to avoid unsafe automatic matches. Optional fuzzy suggestions compare alphanumeric invoice numbers only for candidate discovery; they never alter exact reconciliation results. Review flagged invoices and validation warnings before using the report for GST decisions.</p>
+<p class="notice">Invoice normalization ignores case and whitespace but preserves punctuation and leading zeros to avoid unsafe automatic matches. When enabled, fuzzy matching can mark safe, unambiguous pairs as Fuzzy Matched; pairs failing amount tolerances or having ambiguous alternatives remain in review. Exact matches are processed first. Review flagged invoices and validation warnings before using the report for GST decisions.</p>
 <link rel="stylesheet" href="{{ url_for('static', filename='gst_results.css') }}">
 <script src="{{ url_for('static', filename='app.js') }}" defer></script>
 {% endblock %}
