@@ -580,8 +580,9 @@ def reconcile_gst_tables(pur_records, portal_records, tolerance=2.0, fuzzy_enabl
     fuzzy_review_pur, fuzzy_review_portal = {}, {}
     fuzzy_matched_pairs = []
     if fuzzy_enabled:
-        # Fuzzy second pass: same GSTIN, >=75% invoice similarity, dates within 30 days.
-        # Automatic Fuzzy Matched status additionally requires taxable <=₹10 and each tax <=₹2.
+        # Fuzzy second pass: same GSTIN, >=75% invoice similarity, dates within 3 days.
+        # Automatic Fuzzy Matched status additionally requires taxable <=₹10 and
+        # the combined tax amount (IGST + CGST + SGST) to match exactly.
         eligible_pur = [i for i in remaining_pur if i not in possible_mismatch_pur]
         eligible_portal = [j for j in remaining_portal if j not in possible_mismatch_portal]
         candidates = []
@@ -602,39 +603,55 @@ def reconcile_gst_tables(pur_records, portal_records, tolerance=2.0, fuzzy_enabl
                 if not right_inv or not right_date:
                     continue
                 date_gap = abs((left_date - right_date).days)
-                if date_gap > 30:
+                if date_gap > 3:
                     continue
                 similarity = SequenceMatcher(None, left_inv, right_inv).ratio() * 100
                 if similarity < 75:
                     continue
-                compared = []
+
+                # Retain the agreed taxable-value tolerance of ₹10.
+                # Tax is compared as one combined amount: IGST + CGST + SGST.
                 missing_amounts = []
                 failed_amounts = []
-                for field in amount_fields:
-                    a, b = left.get(field), right.get(field)
-                    limit = 10.0 if field == "taxable" else 2.0
-                    if a is None or b is None:
-                        missing_amounts.append(field)
-                    else:
-                        difference = abs(b - a)
-                        compared.append((field, difference, limit))
-                        if difference > limit:
-                            failed_amounts.append((field, difference, limit))
-                amounts_pass = not missing_amounts and not failed_amounts and len(compared) == 4
-                amount_score = (sum(1 for _, diff, limit in compared if diff <= limit) / 4 * 100) if compared else 0.0
-                date_score = max(0.0, 100.0 - (date_gap / 30.0 * 100.0))
+                taxable_left, taxable_right = left.get("taxable"), right.get("taxable")
+                if taxable_left is None or taxable_right is None:
+                    missing_amounts.append("taxable")
+                    taxable_difference = None
+                else:
+                    taxable_difference = abs(taxable_right - taxable_left)
+                    if taxable_difference > 10.0:
+                        failed_amounts.append(("taxable", taxable_difference, 10.0))
+
+                left_tax_parts = [left.get(field) for field in ("igst", "cgst", "sgst")]
+                right_tax_parts = [right.get(field) for field in ("igst", "cgst", "sgst")]
+                if any(value is None for value in left_tax_parts + right_tax_parts):
+                    missing_amounts.append("total tax")
+                    total_tax_left = total_tax_right = None
+                    total_tax_difference = None
+                else:
+                    total_tax_left = sum(left_tax_parts)
+                    total_tax_right = sum(right_tax_parts)
+                    total_tax_difference = abs(total_tax_right - total_tax_left)
+                    if round(total_tax_difference, 2) != 0:
+                        failed_amounts.append(("total tax", total_tax_difference, 0.0))
+
+                amounts_pass = not missing_amounts and not failed_amounts
+                amount_score = 100.0 if amounts_pass else 0.0
+                date_score = max(0.0, 100.0 - (date_gap / 3.0 * 100.0))
                 confidence = round(similarity * 0.70 + amount_score * 0.20 + date_score * 0.10, 1)
                 taxable_diff = (right["taxable"] - left["taxable"]) if left["taxable"] is not None and right["taxable"] is not None else None
                 invoice_value_diff = (right["invoice_value"] - left["invoice_value"]) if left["invoice_value"] is not None and right["invoice_value"] is not None else None
                 tax_detail = ", ".join(f"{field.upper()} ₹{diff:,.2f} (limit ₹{limit:,.2f})" for field, diff, limit in failed_amounts)
                 missing_detail = ", ".join(x.upper() for x in missing_amounts)
-                amount_note = "Taxable and all tax fields are within tolerance" if amounts_pass else "; ".join(x for x in [f"Over tolerance: {tax_detail}" if tax_detail else "", f"Missing amounts: {missing_detail}" if missing_detail else ""] if x)
+                amount_note = ("Taxable difference is within ₹10 and combined tax (IGST + CGST + SGST) is identical" if amounts_pass else "; ".join(x for x in [f"Over tolerance / mismatch: {tax_detail}" if tax_detail else "", f"Missing amounts: {missing_detail}" if missing_detail else ""] if x))
                 candidates.append({
                     "i": i, "j": j, "gstin": left_gstin, "name": left["name"] or right["name"],
                     "invoice_pur": left["invoice"], "invoice_2b": right["invoice"],
                     "date_pur": left["date"], "date_2b": right["date"],
                     "invoice_similarity": round(similarity, 1), "confidence": confidence,
                     "date_gap": date_gap, "amounts_agree": amounts_pass,
+                    "total_tax_pur": total_tax_left, "total_tax_2b": total_tax_right,
+                    "total_tax_diff": (total_tax_right - total_tax_left) if total_tax_left is not None and total_tax_right is not None else None,
                     "taxable_diff": taxable_diff, "invoice_value_diff": invoice_value_diff,
                     "igst_diff": (right["igst"] - left["igst"]) if left["igst"] is not None and right["igst"] is not None else None,
                     "cgst_diff": (right["cgst"] - left["cgst"]) if left["cgst"] is not None and right["cgst"] is not None else None,
@@ -673,7 +690,7 @@ def reconcile_gst_tables(pur_records, portal_records, tolerance=2.0, fuzzy_enabl
             auto_ids.add((candidate["i"], candidate["j"]))
             fuzzy_matched_pairs.append(candidate)
             line = make_gst_line(pur[candidate["i"]], portal[candidate["j"]], "Fuzzy Matched", tolerance,
-                f"Fuzzy match accepted: invoice numbers {candidate['invoice_similarity']:.1f}% similar; same GSTIN; dates {candidate['date_gap']} day(s) apart; taxable difference within ₹10 and each tax difference within ₹2. Manual verification is still recommended.")
+                f"Fuzzy match accepted: invoice numbers {candidate['invoice_similarity']:.1f}% similar; same GSTIN; dates {candidate['date_gap']} day(s) apart (maximum 3); taxable difference within ₹10; combined tax (IGST + CGST + SGST) is identical. Manual verification is still recommended.")
             line["invoice_similarity"] = candidate["invoice_similarity"]
             line["confidence"] = candidate["confidence"]
             reconciliation.append(line)
@@ -806,7 +823,7 @@ def build_gst_workbook(report):
     fuzzy_columns = [
         ("GSTIN", "gstin"), ("Party", "name"), ("Purchase Invoice", "invoice_pur"), ("2B Invoice", "invoice_2b"),
         ("Purchase Date", "date_pur"), ("2B Date", "date_2b"), ("Invoice Similarity %", "invoice_similarity"),
-        ("Confidence %", "confidence"), ("Date Gap (days)", "date_gap"), ("Amounts Pass (Taxable ₹10 / Tax ₹2)", "amounts_agree"), ("Status", "status"),
+        ("Confidence %", "confidence"), ("Date Gap (days)", "date_gap"), ("Total Tax - Purchase", "total_tax_pur"), ("Total Tax - 2B", "total_tax_2b"), ("Total Tax Difference", "total_tax_diff"), ("Amounts Pass (Taxable ₹10 / Combined Tax Exact)", "amounts_agree"), ("Status", "status"),
         ("Taxable Diff (2B - Pur)", "taxable_diff"), ("Invoice Value Diff (2B - Pur)", "invoice_value_diff"),
         ("IGST Diff (2B - Pur)", "igst_diff"), ("CGST Diff (2B - Pur)", "cgst_diff"), ("SGST Diff (2B - Pur)", "sgst_diff"),
         ("Explanation", "explanation"), ("Recommended Action", "action"),
@@ -819,7 +836,7 @@ def build_gst_workbook(report):
     summary_rows.extend([["Old Bill Filed", len(old_bills)], ["All Discrepancies", len(all_discrepancies)],
                          ["Validation warnings", len(report["validation"])], ["Duplicate / mismatch review entries", len(report["duplicates"])],
                          ["Difference convention", "2B minus Pur; positive means 2B is higher"],
-                         ["Matching rule", "Normalized GSTIN + invoice number; invoice-only overlap flags possible GSTIN mismatch; duplicates are not auto-matched"], ["Fuzzy matching enabled", "Yes" if report.get("fuzzy_enabled") else "No"], ["Fuzzy suggestions", len(report.get("fuzzy_suggestions", []))], ["Fuzzy matching rule", "Same GSTIN, invoice similarity >=75%, dates within 30 days; auto-match only when taxable difference <=₹10, each tax difference <=₹2, and pairing is unambiguous; otherwise review"]])
+                         ["Matching rule", "Normalized GSTIN + invoice number; invoice-only overlap flags possible GSTIN mismatch; duplicates are not auto-matched"], ["Fuzzy matching enabled", "Yes" if report.get("fuzzy_enabled") else "No"], ["Fuzzy suggestions", len(report.get("fuzzy_suggestions", []))], ["Fuzzy matching rule", "Same GSTIN, invoice similarity >=75%, dates within 3 days; auto-match only when taxable difference <=₹10, combined IGST+CGST+SGST is identical, and pairing is unambiguous; otherwise review"]])
     for row in summary_rows:
         summary.append(row)
     style_sheet(summary)
