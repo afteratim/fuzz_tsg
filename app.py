@@ -7,6 +7,7 @@ import secrets
 import logging
 import tempfile
 import time
+from difflib import SequenceMatcher
 from collections import defaultdict, deque
 from pathlib import Path
 from functools import wraps
@@ -268,7 +269,8 @@ def run_gst_reconciliation():
             try:
                 pur_rows = read_named_table(workbook, "Pur")
                 portal_rows = read_named_table(workbook, "2B")
-                report = reconcile_gst_tables(pur_rows, portal_rows, tolerance=2.0)
+                fuzzy_enabled = request.form.get("fuzzy_enabled") == "on"
+                report = reconcile_gst_tables(pur_rows, portal_rows, tolerance=2.0, fuzzy_enabled=fuzzy_enabled)
                 output = build_gst_workbook(report)
             finally:
                 workbook.close()
@@ -505,7 +507,7 @@ def gst_record_view(record):
     }
 
 
-def reconcile_gst_tables(pur_records, portal_records, tolerance=2.0):
+def reconcile_gst_tables(pur_records, portal_records, tolerance=2.0, fuzzy_enabled=False):
     pur = [gst_record_view(r) for r in pur_records]
     portal = [gst_record_view(r) for r in portal_records]
     def key(row):
@@ -570,6 +572,61 @@ def reconcile_gst_tables(pur_records, portal_records, tolerance=2.0):
                 if pur[i]["gstin"] != portal[j]["gstin"]:
                     possible_mismatch_pur.add(i); possible_mismatch_portal.add(j)
                     duplicates.append([f"{pur[i]['gstin']} / {portal[j]['gstin']}", inv, "Pur + 2B", 2, "Invoice number matches but GSTIN differs; verify supplier and invoice"] )
+    fuzzy_suggestions = []
+    if fuzzy_enabled:
+        # Fuzzy matching is a suggestion-only second pass. It never changes exact-match results.
+        eligible_pur = [i for i in remaining_pur if i not in possible_mismatch_pur]
+        eligible_portal = [j for j in remaining_portal if j not in possible_mismatch_portal]
+        used_suggestion_pairs = set()
+        for i in eligible_pur:
+            left = pur[i]
+            left_inv = re.sub(r"[^A-Z0-9]", "", normalize_invoice(left["invoice"]))
+            left_gstin = normalize_gstin(left["gstin"])
+            left_date = parse_gst_date(left["date"])
+            if not left_inv or not left_gstin or not left_date:
+                continue
+            for j in eligible_portal:
+                right = portal[j]
+                if j in portal_used:
+                    continue
+                if left_gstin != normalize_gstin(right["gstin"]):
+                    continue
+                right_inv = re.sub(r"[^A-Z0-9]", "", normalize_invoice(right["invoice"]))
+                right_date = parse_gst_date(right["date"])
+                if not right_inv or not right_date:
+                    continue
+                date_gap = abs((left_date - right_date).days)
+                if date_gap > 30:
+                    continue
+                similarity = SequenceMatcher(None, left_inv, right_inv).ratio() * 100
+                if similarity < 85:
+                    continue
+                pair = (i, j)
+                if pair in used_suggestion_pairs:
+                    continue
+                used_suggestion_pairs.add(pair)
+                amount_fields = ("taxable", "invoice_value", "igst", "cgst", "sgst")
+                compared = [(left[f], right[f]) for f in amount_fields if left[f] is not None and right[f] is not None]
+                amount_match_count = sum(1 for a, b in compared if abs(b - a) <= tolerance)
+                amounts_agree = bool(compared) and amount_match_count == len(compared)
+                amount_score = (amount_match_count / len(compared) * 100) if compared else 50.0
+                date_score = max(0.0, 100.0 - (date_gap / 30.0 * 100.0))
+                confidence = round(similarity * 0.70 + amount_score * 0.20 + date_score * 0.10, 1)
+                amount_note = (f"{amount_match_count}/{len(compared)} compared amount fields within ₹{tolerance:.2f}" if compared else "Amounts could not be fully compared")
+                fuzzy_suggestions.append({
+                    "gstin": left_gstin, "name": left["name"] or right["name"],
+                    "invoice_pur": left["invoice"], "invoice_2b": right["invoice"],
+                    "date_pur": left["date"], "date_2b": right["date"],
+                    "invoice_similarity": round(similarity, 1), "confidence": confidence,
+                    "date_gap": date_gap, "amounts_agree": amounts_agree,
+                    "taxable_diff": (right["taxable"] - left["taxable"]) if left["taxable"] is not None and right["taxable"] is not None else None,
+                    "invoice_value_diff": (right["invoice_value"] - left["invoice_value"]) if left["invoice_value"] is not None and right["invoice_value"] is not None else None,
+                    "explanation": f"Invoice numbers are {similarity:.1f}% similar; dates differ by {date_gap} day(s); {amount_note}. Same GSTIN. Suggested for manual review only.",
+                    "action": "Compare original invoice, GSTIN, date and tax values. Confirm manually; this suggestion is not a match.",
+                    "purchase_source_row": left["source_row"], "portal_source_row": right["source_row"],
+                })
+        fuzzy_suggestions.sort(key=lambda x: (not x["amounts_agree"], -x["confidence"], x["date_gap"]))
+
     for i in remaining_pur:
         if i in possible_mismatch_pur:
             reconciliation.append(make_gst_line(pur[i], None, "GSTIN Mismatch - Review", tolerance, "Same invoice number found in 2B with a different GSTIN"))
@@ -609,7 +666,7 @@ def reconcile_gst_tables(pur_records, portal_records, tolerance=2.0):
     # Summary counts refer to reconciliation lines; duplicate records are review lines, not automatic matches.
     counts = defaultdict(int)
     for line in reconciliation: counts[line["remark"]] += 1
-    return {"reconciliation": reconciliation, "duplicates": duplicates, "validation": validation, "pur_count": len(pur), "portal_count": len(portal), "tolerance": tolerance, "counts": dict(counts)}
+    return {"reconciliation": reconciliation, "duplicates": duplicates, "validation": validation, "fuzzy_suggestions": fuzzy_suggestions, "fuzzy_enabled": fuzzy_enabled, "pur_count": len(pur), "portal_count": len(portal), "tolerance": tolerance, "counts": dict(counts)}
 
 
 def make_gst_line(pur, portal, remark, tolerance, detail):
@@ -662,6 +719,14 @@ def build_gst_workbook(report):
     write_gst_subset(wb, "All Discrepancies", columns, all_discrepancies)
     write_sheet(wb.create_sheet("Validation"), ["Source", "Excel Row in Source Table", "GSTIN", "Invoice No.", "Validation Warning"], report["validation"])
     write_sheet(wb.create_sheet("Duplicate Keys"), ["GSTIN / GSTINs", "Normalized Invoice No.", "Source", "Count", "Review Note"], report["duplicates"])
+    fuzzy_columns = [
+        ("GSTIN", "gstin"), ("Party", "name"), ("Purchase Invoice", "invoice_pur"), ("2B Invoice", "invoice_2b"),
+        ("Purchase Date", "date_pur"), ("2B Date", "date_2b"), ("Invoice Similarity %", "invoice_similarity"),
+        ("Confidence %", "confidence"), ("Date Gap (days)", "date_gap"), ("Amounts Agree Within ₹2", "amounts_agree"),
+        ("Taxable Diff (2B - Pur)", "taxable_diff"), ("Invoice Value Diff (2B - Pur)", "invoice_value_diff"),
+        ("Explanation", "explanation"), ("Recommended Action", "action"),
+        ("Purchase Source Row", "purchase_source_row"), ("2B Source Row", "portal_source_row")]
+    write_gst_subset(wb, "Fuzzy Suggestions", fuzzy_columns, report.get("fuzzy_suggestions", []))
     summary = wb.create_sheet("Summary", 0)
     summary_rows = [["GST 2B and Purchase Reconciliation", "Count / Value"], ["Records in Pur", report["pur_count"]], ["Records in 2B", report["portal_count"]], ["Amount tolerance (₹ per field)", report["tolerance"]]]
     for label in sorted(report["counts"]):
@@ -669,7 +734,7 @@ def build_gst_workbook(report):
     summary_rows.extend([["Old Bill Filed", len(old_bills)], ["All Discrepancies", len(all_discrepancies)],
                          ["Validation warnings", len(report["validation"])], ["Duplicate / mismatch review entries", len(report["duplicates"])],
                          ["Difference convention", "2B minus Pur; positive means 2B is higher"],
-                         ["Matching rule", "Normalized GSTIN + invoice number; invoice-only overlap flags possible GSTIN mismatch; duplicates are not auto-matched"]])
+                         ["Matching rule", "Normalized GSTIN + invoice number; invoice-only overlap flags possible GSTIN mismatch; duplicates are not auto-matched"], ["Fuzzy matching enabled", "Yes" if report.get("fuzzy_enabled") else "No"], ["Fuzzy suggestions", len(report.get("fuzzy_suggestions", []))], ["Fuzzy matching rule", "Same GSTIN, invoice similarity >=85%, dates within 30 days; suggestions only, never auto-matched"]])
     for row in summary_rows:
         summary.append(row)
     style_sheet(summary)
