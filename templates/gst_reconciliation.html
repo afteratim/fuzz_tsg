@@ -19,6 +19,11 @@
     </label>
     <input id="workbook" name="workbook" type="file" required accept=".xlsx">
     <div id="selected-files" class="selected-files">No file selected</div>
+    <label class="fuzzy-toggle" for="fuzzy_enabled">
+      <span class="fuzzy-toggle-copy"><strong>Enable fuzzy invoice suggestions</strong><small>Optional second pass: same GSTIN, invoice similarity ≥85%, dates within 30 days. Suggestions are never auto-matched.</small></span>
+      <input id="fuzzy_enabled" name="fuzzy_enabled" type="checkbox" value="on">
+      <span class="fuzzy-switch" aria-hidden="true"></span>
+    </label>
     <button class="primary" type="submit">Reconcile GST data <span>→</span></button>
   </form>
 </section>
@@ -28,6 +33,7 @@
   <article class="info-card"><span class="card-icon">▤</span><h3>Excel output</h3><p>Summary, Reconciliation, Missing in 2B, Missing in Purchase, Tax Differences, Duplicates & Review, Duplicate Keys, and Validation.</p></article>
 </section>
 <p class="notice"><strong>Excel table names:</strong> The purchase table must be named <strong>Pur</strong>. Excel versions may not allow a table name starting with a number, so name the portal table <strong>Table2B</strong> (or <strong>T2B</strong>) if <strong>2B</strong> is rejected. The analyzer accepts these aliases. Required columns: DATE, Particulars, Supplier Invoice No., GSTIN/UIN, TAXABLE VALUE, INV VALUE, IGST, CGST, SGST.</p>
-<p class="notice">Invoice normalization ignores case and whitespace but preserves punctuation and leading zeros to avoid unsafe automatic matches. Review flagged invoices and validation warnings before using the report for GST decisions.</p>
+<p class="notice">Invoice normalization ignores case and whitespace but preserves punctuation and leading zeros to avoid unsafe automatic matches. Optional fuzzy suggestions compare alphanumeric invoice numbers only for candidate discovery; they never alter exact reconciliation results. Review flagged invoices and validation warnings before using the report for GST decisions.</p>
+<link rel="stylesheet" href="{{ url_for('static', filename='gst_results.css') }}">
 <script src="{{ url_for('static', filename='app.js') }}" defer></script>
 {% endblock %}
