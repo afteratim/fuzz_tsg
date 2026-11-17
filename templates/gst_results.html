@@ -39,6 +39,28 @@
   <a class="primary gst-download" href="{{ url_for('download_gst_reconciliation', token=token) }}">Download complete Excel report ↓</a>
 </section>
 
+{% if report.fuzzy_enabled %}
+<section class="chat-card fuzzy-results-card">
+  <div class="fuzzy-results-heading">
+    <div><h2>Fuzzy Match Suggestions</h2><p class="muted">{{ report.fuzzy_suggestions|length }} possible pair(s). These are suggestions only and have not been marked as matched.</p></div>
+    <span class="fuzzy-enabled-pill">Fuzzy enabled</span>
+  </div>
+  {% if report.fuzzy_suggestions %}
+  <div class="table-wrap">
+    <table class="data-table fuzzy-table">
+      <thead><tr><th>Confidence</th><th>Invoice similarity</th><th>Party</th><th>GSTIN</th><th>Purchase invoice</th><th>2B invoice</th><th>Purchase date</th><th>2B date</th><th>Date gap</th><th>Taxable diff</th><th>Invoice value diff</th><th>Amounts</th><th>Why suggested</th><th>Recommended action</th></tr></thead>
+      <tbody>{% for suggestion in report.fuzzy_suggestions %}
+        <tr>
+          <td><strong>{{ "%.1f"|format(suggestion.confidence) }}%</strong></td><td>{{ "%.1f"|format(suggestion.invoice_similarity) }}%</td><td>{{ suggestion.name }}</td><td>{{ suggestion.gstin }}</td><td>{{ suggestion.invoice_pur }}</td><td>{{ suggestion.invoice_2b }}</td><td>{{ suggestion.date_pur }}</td><td>{{ suggestion.date_2b }}</td><td>{{ suggestion.date_gap }} day(s)</td>
+          <td>{{ "₹{:,.2f}".format(suggestion.taxable_diff) if suggestion.taxable_diff is not none else "—" }}</td><td>{{ "₹{:,.2f}".format(suggestion.invoice_value_diff) if suggestion.invoice_value_diff is not none else "—" }}</td><td>{{ "Within ₹2" if suggestion.amounts_agree else "Review" }}</td><td>{{ suggestion.explanation }}</td><td>{{ suggestion.action }}</td>
+        </tr>
+      {% endfor %}</tbody>
+    </table>
+  </div>
+  {% else %}<p>No candidates met the current fuzzy rules (same GSTIN, invoice similarity at least 85%, dates within 30 days).</p>{% endif %}
+</section>
+{% endif %}
+
 <section class="chat-card">
   <h2>Filter reconciliation records</h2>
   <div class="gst-filters">
